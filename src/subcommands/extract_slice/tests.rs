@@ -225,7 +225,7 @@ fn transfer_global_state_information() {
             .environment()
             .create_read_write_txn()
             .unwrap();
-        let keys = vec![data[1].0, data[2].0, data[4].0];
+        let keys = [data[1].0, data[2].0, data[4].0];
         let entries: Vec<Option<Trie<Bytes, Bytes>>> =
             destination_store.get_many(&txn, keys.iter()).unwrap();
         for entry in entries {

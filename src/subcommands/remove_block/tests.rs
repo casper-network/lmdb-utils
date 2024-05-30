@@ -125,8 +125,8 @@ fn remove_block_no_deploys() {
 
     let mut rw_txn = test_fixture.block_store.checkout_rw().unwrap();
 
-    for i in 1..TRANSACTION_COUNT {
-        let _ = rw_txn.write(&transactions[i]).unwrap();
+    for transaction in transactions.iter().take(TRANSACTION_COUNT).skip(1) {
+        let _ = rw_txn.write(transaction).unwrap();
     }
 
     for (block_id, block) in blocks.iter().enumerate() {

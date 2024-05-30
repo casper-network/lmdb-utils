@@ -35,58 +35,48 @@ fn indices_initialization() {
     let mut fixture = LmdbTestFixture::new();
 
     // Create mock blocks and set an era and height for each one.
-    let mut blocks: Vec<Block> = vec![];
-    blocks.push(
+    let blocks: Vec<Block> = vec![
         TestBlockBuilder::new()
             .height(100)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(200)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(300)
             .era(20)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(400)
             .era(20)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Create mock switch blocks for each era and set an appropriate era and height for each one.
-    let mut switch_blocks: Vec<Block> = vec![];
-    switch_blocks.push(
+    let switch_blocks: Vec<Block> = vec![
         TestBlockBuilder::new()
             .height(80)
             .era(blocks[0].era_id() - 1)
             .switch_block(true)
             .build(&mut rng)
             .into(),
-    );
-    switch_blocks.push(
         TestBlockBuilder::new()
             .height(280)
             .era(blocks[2].era_id() - 1)
             .switch_block(true)
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Insert the blocks into the database.
     let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
@@ -137,16 +127,13 @@ fn indices_initialization_with_upgrade() {
     let mut rng = TestRng::new();
     let mut fixture = LmdbTestFixture::new();
     // Create mock blocks and set an era and height for each one.
-    let mut blocks: Vec<Block> = vec![];
-    blocks.push(
+    let blocks: Vec<Block> = vec![
         TestBlockBuilder::new()
             .height(80)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(200)
             .era(11)
@@ -154,8 +141,6 @@ fn indices_initialization_with_upgrade() {
             .protocol_version(ProtocolVersion::from_parts(1, 1, 0))
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(290)
             .era(12)
@@ -163,8 +148,6 @@ fn indices_initialization_with_upgrade() {
             .protocol_version(ProtocolVersion::from_parts(2, 0, 0))
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(350)
             .era(13)
@@ -172,27 +155,22 @@ fn indices_initialization_with_upgrade() {
             .protocol_version(ProtocolVersion::from_parts(2, 0, 0))
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Create mock switch blocks for each era and set an appropriate era and height for each one.
-    let mut switch_blocks: Vec<Block> = vec![];
-    switch_blocks.push(
+    let switch_blocks: Vec<Block> = vec![
         TestBlockBuilder::new()
             .height(60)
             .era(blocks[0].era_id() - 1)
             .switch_block(true)
             .build(&mut rng)
             .into(),
-    );
-    switch_blocks.push(
         TestBlockBuilder::new()
             .height(180)
             .era(blocks[1].era_id() - 1)
             .switch_block(true)
             .build(&mut rng)
             .into(),
-    );
-    switch_blocks.push(
         TestBlockBuilder::new()
             .height(250)
             .era(blocks[2].era_id() - 1)
@@ -200,8 +178,6 @@ fn indices_initialization_with_upgrade() {
             .protocol_version(ProtocolVersion::from_parts(1, 1, 0))
             .build(&mut rng)
             .into(),
-    );
-    switch_blocks.push(
         TestBlockBuilder::new()
             .height(300)
             .era(blocks[3].era_id() - 1)
@@ -209,7 +185,7 @@ fn indices_initialization_with_upgrade() {
             .protocol_version(ProtocolVersion::from_parts(2, 0, 0))
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Insert the blocks into the database.
     let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
@@ -287,22 +263,10 @@ fn era_weights() {
     let mut fixture = LmdbTestFixture::new();
 
     // Create mock switch blocks for each era and set an appropriate era and height for each one.
-    let mut switch_blocks: Vec<Block> = vec![];
-
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        10,
-        80,
-        &[(KEYS[0].clone(), 100.into())],
-        None,
-    ));
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        20,
-        280,
-        &[(KEYS[1].clone(), 100.into())],
-        None,
-    ));
+    let switch_blocks: Vec<Block> = vec![
+        new_switch_block_with_weights(&mut rng, 10, 80, &[(KEYS[0].clone(), 100.into())], None),
+        new_switch_block_with_weights(&mut rng, 20, 280, &[(KEYS[1].clone(), 100.into())], None),
+    ];
 
     // Insert the blocks into the database.
     let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
@@ -368,26 +332,19 @@ fn era_weights_with_upgrade() {
     let mut fixture = LmdbTestFixture::new();
 
     // Create mock switch blocks for each era and set an appropriate era and height for each one.
-    let mut switch_blocks: Vec<Block> = vec![];
-
-    // Set an era, height and next era weights for the first one.
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        10,
-        80,
-        &[(KEYS[0].clone(), 100.into())],
-        None,
-    ));
-
-    // Set an era, height and next era weights for the second one.
-    // Upgrade the version of the second switch block.
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        11,
-        280,
-        &[(KEYS[1].clone(), 100.into())],
-        Some(ProtocolVersion::from_parts(1, 1, 0)),
-    ));
+    let switch_blocks: Vec<Block> = vec![
+        // Set an era, height and next era weights for the first one.
+        new_switch_block_with_weights(&mut rng, 10, 80, &[(KEYS[0].clone(), 100.into())], None),
+        // Set an era, height and next era weights for the second one.
+        // Upgrade the version of the second switch block.
+        new_switch_block_with_weights(
+            &mut rng,
+            11,
+            280,
+            &[(KEYS[1].clone(), 100.into())],
+            Some(ProtocolVersion::from_parts(1, 1, 0)),
+        ),
+    ];
 
     // Insert the blocks into the database.
     let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
@@ -428,39 +385,32 @@ fn purge_signatures_should_work() {
     let mut fixture = LmdbTestFixture::new();
 
     // Create mock blocks and set an era and height for each one.
-    let mut blocks: Vec<Block> = vec![];
-    blocks.push(
+    let blocks: Vec<Block> = vec![
         TestBlockBuilder::new()
             .height(100)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(200)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(300)
             .era(20)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    blocks.push(
         TestBlockBuilder::new()
             .height(400)
             .era(20)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Create mock block signatures.
     let mut block_signatures: Vec<BlockSignaturesV2> = blocks
@@ -470,34 +420,34 @@ fn purge_signatures_should_work() {
                 *block.hash(),
                 block.height(),
                 block.era_id(),
-                ChainNameDigest::from_digest(Digest::random(&mut rng).into()),
+                ChainNameDigest::from_digest(Digest::random(&mut rng)),
             )
         })
         .collect();
 
     // Create mock switch blocks for each era and set an appropriate era and height for each one.
     // Add weights for this switch block (500, 500).
-    let mut switch_blocks: Vec<Block> = vec![];
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        (blocks[0].era_id() - 1).value(),
-        80,
-        &[(KEYS[0].clone(), 500.into()), (KEYS[1].clone(), 500.into())],
-        None,
-    ));
-
-    // Add weights for this switch block (300, 300, 400).
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        (blocks[2].era_id() - 1).value(),
-        280,
-        &[
-            (KEYS[0].clone(), 300.into()),
-            (KEYS[1].clone(), 300.into()),
-            (KEYS[2].clone(), 400.into()),
-        ],
-        None,
-    ));
+    let switch_blocks: Vec<Block> = vec![
+        new_switch_block_with_weights(
+            &mut rng,
+            (blocks[0].era_id() - 1).value(),
+            80,
+            &[(KEYS[0].clone(), 500.into()), (KEYS[1].clone(), 500.into())],
+            None,
+        ),
+        // Add weights for this switch block (300, 300, 400).
+        new_switch_block_with_weights(
+            &mut rng,
+            (blocks[2].era_id() - 1).value(),
+            280,
+            &[
+                (KEYS[0].clone(), 300.into()),
+                (KEYS[1].clone(), 300.into()),
+                (KEYS[2].clone(), 400.into()),
+            ],
+            None,
+        ),
+    ];
 
     // Add keys and signatures for block 1.
     block_signatures[0].insert_signature(KEYS[0].clone(), Signature::System);
@@ -610,25 +560,22 @@ fn purge_signatures_bad_input() {
     let mut fixture = LmdbTestFixture::new();
 
     // Create mock blocks and set an era and height for each one.
-    let mut blocks: Vec<Block> = vec![];
-    // Set an era and height for block 1.
-    blocks.push(
+    let blocks: Vec<Block> = vec![
+        // Set an era and height for block 1.
         TestBlockBuilder::new()
             .height(100)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    // Set an era and height for block 2.
-    blocks.push(
+        // Set an era and height for block 2.
         TestBlockBuilder::new()
             .height(200)
             .era(20)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Create mock block signatures.
     let mut block_signatures: Vec<BlockSignaturesV2> = blocks
@@ -638,29 +585,30 @@ fn purge_signatures_bad_input() {
                 *block.hash(),
                 block.height(),
                 block.era_id(),
-                ChainNameDigest::from_digest(Digest::random(&mut rng).into()),
+                ChainNameDigest::from_digest(Digest::random(&mut rng)),
             )
         })
         .collect();
 
     // Create mock switch blocks for each era and set an appropriate era and height for each one.
-    let mut switch_blocks: Vec<Block> = vec![];
-    // Add weights for this switch block (700, 300).
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        (blocks[0].era_id() - 1).value(),
-        80,
-        &[(KEYS[0].clone(), 700.into()), (KEYS[1].clone(), 300.into())],
-        None,
-    ));
-    // Add weights for this switch block (400, 600).
-    switch_blocks.push(new_switch_block_with_weights(
-        &mut rng,
-        (blocks[1].era_id() - 1).value(),
-        180,
-        &[(KEYS[0].clone(), 400.into()), (KEYS[1].clone(), 600.into())],
-        None,
-    ));
+    let switch_blocks: Vec<Block> = vec![
+        // Add weights for this switch block (700, 300).
+        new_switch_block_with_weights(
+            &mut rng,
+            (blocks[0].era_id() - 1).value(),
+            80,
+            &[(KEYS[0].clone(), 700.into()), (KEYS[1].clone(), 300.into())],
+            None,
+        ),
+        // Add weights for this switch block (400, 600).
+        new_switch_block_with_weights(
+            &mut rng,
+            (blocks[1].era_id() - 1).value(),
+            180,
+            &[(KEYS[0].clone(), 400.into()), (KEYS[1].clone(), 600.into())],
+            None,
+        ),
+    ];
 
     // Add keys and signatures for block 1.
     block_signatures[0].insert_signature(KEYS[0].clone(), Signature::System);
@@ -717,25 +665,22 @@ fn purge_signatures_missing_from_db() {
     let mut fixture = LmdbTestFixture::new();
 
     // Create mock blocks and set an era and height for each one.
-    let mut blocks: Vec<Block> = vec![];
-    // Set an era and height for block 1.
-    blocks.push(
+    let blocks: Vec<Block> = vec![
+        // Set an era and height for block 1.
         TestBlockBuilder::new()
             .height(100)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
-    // Set an era and height for block 2.
-    blocks.push(
+        // Set an era and height for block 2.
         TestBlockBuilder::new()
             .height(200)
             .era(10)
             .switch_block(false)
             .build(&mut rng)
             .into(),
-    );
+    ];
 
     // Create mock block signatures.
     let mut block_signatures: Vec<BlockSignaturesV2> = blocks
@@ -745,7 +690,7 @@ fn purge_signatures_missing_from_db() {
                 *block.hash(),
                 block.height(),
                 block.era_id(),
-                ChainNameDigest::from_digest(Digest::random(&mut rng).into()),
+                ChainNameDigest::from_digest(Digest::random(&mut rng)),
             )
         })
         .collect();
