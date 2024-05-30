@@ -1,4 +1,3 @@
-pub(crate) mod block_signatures;
 mod purge;
 mod signatures;
 #[cfg(test)]
@@ -6,8 +5,8 @@ mod tests;
 
 use std::{collections::BTreeSet, path::Path};
 
-use bincode::Error as BincodeError;
-use casper_node::types::BlockHash;
+use casper_storage::block_store::BlockStoreError;
+use casper_types::BlockHash;
 use casper_types::EraId;
 use clap::{Arg, ArgMatches, Command};
 use lmdb::Error as LmdbError;
@@ -28,19 +27,16 @@ pub enum Error {
     /// Database operation error.
     #[error("Error operating the database: {0}")]
     Database(#[from] LmdbError),
+    /// Block store error.
+    #[error("Error encountered with block store: {0}")]
+    BlockStore(#[from] BlockStoreError),
     #[error("Found duplicate block header with height {0}")]
     DuplicateBlock(u64),
-    /// Parsing error on entry in the block header database.
-    #[error("Error parsing block header with hash {0}: {1}")]
-    HeaderParsing(BlockHash, BincodeError),
     #[error("Missing switch block with weights for era {0}")]
     MissingEraWeights(EraId),
-    /// Serialization error for an entry in the signatures database.
-    #[error("Error serializing block signatures for block hash {0}: {1}")]
-    Serialize(BlockHash, BincodeError),
-    /// Parsing error on entry at index in the signatures database.
-    #[error("Error parsing block signatures for block hash {0}: {1}")]
-    SignaturesParsing(BlockHash, BincodeError),
+    /// Missing block header from database.
+    #[error("Missing block header from database at hash: {0}")]
+    MissingBlockHeader(BlockHash),
 }
 
 enum DisplayOrder {

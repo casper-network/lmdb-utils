@@ -1,30 +1,41 @@
+mod approvals_hashes_db;
 mod block_body_db;
-mod block_body_merkle_db;
+mod block_body_v2_db;
 mod block_header_db;
+mod block_header_v2;
 mod block_metadata_db;
-mod deploy_hashes_db;
+mod block_metadata_v2_db;
 mod deploy_metadata_db;
 mod deploys_db;
+mod execution_results_db;
 mod finalized_approvals_db;
-mod proposers_db;
 mod state_store_db;
+mod transactions_db;
+mod transfer_db;
+mod versioned_approvals_hashes_db;
+mod versioned_finalized_approvals_db;
+mod versioned_transfers_db;
+
 #[cfg(test)]
 mod tests;
-mod transfer_db;
-mod transfer_hashes_db;
 
-pub use block_body_db::BlockBodyDatabase;
-pub use block_body_merkle_db::BlockBodyMerkleDatabase;
-pub use block_header_db::BlockHeaderDatabase;
-pub use block_metadata_db::BlockMetadataDatabase;
-pub use deploy_hashes_db::DeployHashesDatabase;
-pub use deploy_metadata_db::DeployMetadataDatabase;
+pub use approvals_hashes_db::ApprovalsHashesDatabase;
+pub use block_body_db::LegacyBlockBodyDatabase;
+pub use block_body_v2_db::VersionedBlockBodyDatabase;
+pub use block_header_db::LegacyBlockHeaderDatabase;
+pub use block_header_v2::VersionedBlockHeaderDatabase;
+pub use block_metadata_db::LegacyBlockMetadataDatabase;
+pub use block_metadata_v2_db::VersionedBlockMetadataDatabase;
+pub use deploy_metadata_db::LegacyDeployMetadataDatabase;
 pub use deploys_db::DeployDatabase;
+pub use execution_results_db::VersionedExecutionResultsDatabase;
 pub use finalized_approvals_db::FinalizedApprovalsDatabase;
-pub use proposers_db::ProposerDatabase;
 pub use state_store_db::StateStoreDatabase;
+pub use transactions_db::TransactionsDatabase;
 pub use transfer_db::TransferDatabase;
-pub use transfer_hashes_db::TransferHashesDatabase;
+pub use versioned_approvals_hashes_db::VersionedApprovalsHashesDatabase;
+pub use versioned_finalized_approvals_db::VersionedFinalizedApprovalsDatabase;
+pub use versioned_transfers_db::VersionedTransfersDatabase;
 
 use std::{
     fmt::{Display, Formatter, Result as FormatterResult},
@@ -43,6 +54,11 @@ pub const STORAGE_FILE_NAME: &str = "storage.lmdb";
 pub const TRIE_STORE_FILE_NAME: &str = "data.lmdb";
 const ENTRY_LOG_INTERVAL: usize = 100_000;
 const MAX_DB_READERS: u32 = 100;
+
+const GIB: usize = 1024 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_BLOCK_STORE_SIZE: usize = 450 * GIB;
+pub(crate) const DEFAULT_MAX_DEPLOY_STORE_SIZE: usize = 300 * GIB;
+pub(crate) const DEFAULT_MAX_DEPLOY_METADATA_STORE_SIZE: usize = 300 * GIB;
 
 #[derive(Debug, Error)]
 pub enum DeserializationError {
@@ -109,7 +125,8 @@ pub trait Database {
             info!("Skipping {} entries.", start_at);
         }
         let mut error_buffer = vec![];
-        for (idx, (_raw_key, raw_val)) in cursor.iter().skip(start_at).enumerate() {
+        for (idx, entry) in cursor.iter().skip(start_at).enumerate() {
+            let (_raw_key, raw_val) = entry.map_err(Error::Database)?;
             if let Err(e) =
                 Self::parse_element(raw_val).map_err(|parsing_err| Error::Parsing(idx, parsing_err))
             {

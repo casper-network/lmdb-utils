@@ -28,13 +28,13 @@ enum DisplayOrder {
     Unsparse,
 }
 
+// TODO: revisit this since we don't depend on the node anymore.
 const VERSION_STRING: &str = concat!(
     crate_version!(),
     "\n",
     "This version of ",
     crate_name!(),
-    " is compatible with casper-node version ",
-    env!("CASPER_NODE_VERSION")
+    " is compatible with casper-storage 2.0 ",
 );
 
 fn cli() -> Command<'static> {

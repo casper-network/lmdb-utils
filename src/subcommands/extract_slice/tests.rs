@@ -1,247 +1,97 @@
-use std::slice;
-
-use casper_execution_engine::storage::{
-    store::StoreExt,
-    transaction_source::{lmdb::LmdbEnvironment, TransactionSource},
-    trie::Trie,
-    trie_store::lmdb::LmdbTrieStore,
+use casper_storage::{
+    block_store::{
+        types::{BlockExecutionResults, BlockHashHeightAndEra, BlockTransfers},
+        BlockStoreProvider, BlockStoreTransaction, DataReader, DataWriter,
+    },
+    global_state::{store::StoreExt, transaction_source::TransactionSource, trie::Trie},
 };
-use casper_hashing::Digest;
-use casper_node::types::{BlockHash, DeployHash, DeployMetadata};
 use casper_types::bytesrepr::{Bytes, ToBytes};
-use lmdb::{DatabaseFlags, Error as LmdbError, Transaction, WriteFlags};
+use casper_types::{
+    execution::ExecutionResult, testing::TestRng, Block, BlockHeader, Digest, TestBlockBuilder,
+    Transaction, Transfer,
+};
+use lmdb::Transaction as LmdbTransaction;
 
 use crate::{
-    common::db::{
-        BlockBodyDatabase, BlockHeaderDatabase, Database, DeployDatabase, DeployMetadataDatabase,
-        TransferDatabase, STORAGE_FILE_NAME,
-    },
     subcommands::{
-        execution_results_summary::block_body::BlockBody,
-        extract_slice::{db_helpers, global_state, storage},
-        trie_compact::{
-            create_execution_engine, load_execution_engine, tests::create_data, DEFAULT_MAX_DB_SIZE,
-        },
+        extract_slice::{global_state, storage},
+        trie_compact::{create_data_access_layer, tests::create_data, DEFAULT_MAX_DB_SIZE},
     },
-    test_utils::{
-        mock_block_header, mock_deploy_hash, mock_deploy_metadata, LmdbTestFixture, MockBlockHeader,
-    },
+    test_utils::LmdbTestFixture,
 };
-
-#[test]
-fn transfer_data_between_dbs() {
-    const DATA_COUNT: usize = 4;
-    const MOCK_DB_NAME: &str = "mock_data";
-
-    let source_fixture = LmdbTestFixture::new(vec![MOCK_DB_NAME], Some(STORAGE_FILE_NAME));
-
-    let deploy_hashes: Vec<DeployHash> = (0..DATA_COUNT as u8).map(mock_deploy_hash).collect();
-
-    {
-        let env = &source_fixture.env;
-        // Insert the 3 blocks into the database.
-        if let Ok(mut txn) = env.begin_rw_txn() {
-            for (i, deploy_hash) in deploy_hashes.iter().enumerate().take(DATA_COUNT) {
-                txn.put(
-                    *source_fixture.db(Some(MOCK_DB_NAME)).unwrap(),
-                    &i.to_le_bytes(),
-                    &bincode::serialize(deploy_hash).unwrap(),
-                    WriteFlags::empty(),
-                )
-                .unwrap();
-            }
-            txn.commit().unwrap();
-        };
-    }
-
-    let destination_fixture = LmdbTestFixture::new(vec![MOCK_DB_NAME], Some(STORAGE_FILE_NAME));
-
-    {
-        let mut source_txn = source_fixture.env.begin_ro_txn().unwrap();
-        assert_eq!(
-            db_helpers::read_from_db(&mut source_txn, MOCK_DB_NAME, &0usize.to_le_bytes()).unwrap(),
-            bincode::serialize(&deploy_hashes[0]).unwrap()
-        );
-        assert_eq!(
-            db_helpers::read_from_db(&mut source_txn, MOCK_DB_NAME, &DATA_COUNT.to_le_bytes())
-                .unwrap_err(),
-            LmdbError::NotFound
-        );
-        source_txn.commit().unwrap();
-    }
-
-    {
-        let mut destination_txn = destination_fixture.env.begin_rw_txn().unwrap();
-        let serialized_deploy_hash = bincode::serialize(&deploy_hashes[1]).unwrap();
-        assert!(db_helpers::write_to_db(
-            &mut destination_txn,
-            MOCK_DB_NAME,
-            &1usize.to_le_bytes(),
-            &serialized_deploy_hash
-        )
-        .is_ok());
-        destination_txn.commit().unwrap();
-    }
-
-    {
-        let mut source_txn = source_fixture.env.begin_ro_txn().unwrap();
-        let mut destination_txn = destination_fixture.env.begin_rw_txn().unwrap();
-        let serialized_deploy_hash = bincode::serialize(&deploy_hashes[2]).unwrap();
-        let copied_bytes = db_helpers::transfer_to_new_db(
-            &mut source_txn,
-            &mut destination_txn,
-            MOCK_DB_NAME,
-            &2usize.to_le_bytes(),
-        )
-        .unwrap();
-        assert_eq!(serialized_deploy_hash, copied_bytes);
-        assert_eq!(
-            db_helpers::transfer_to_new_db(
-                &mut source_txn,
-                &mut destination_txn,
-                MOCK_DB_NAME,
-                &DATA_COUNT.to_le_bytes()
-            )
-            .unwrap_err(),
-            LmdbError::NotFound
-        );
-        source_txn.commit().unwrap();
-        destination_txn.commit().unwrap();
-    }
-
-    {
-        let destination_txn = destination_fixture.env.begin_ro_txn().unwrap();
-        let destination_db = destination_fixture.db(Some(MOCK_DB_NAME)).unwrap();
-        assert_eq!(
-            destination_txn
-                .get(*destination_db, &0usize.to_le_bytes())
-                .unwrap_err(),
-            LmdbError::NotFound
-        );
-        assert_eq!(
-            destination_txn
-                .get(*destination_db, &1usize.to_le_bytes())
-                .unwrap(),
-            bincode::serialize(&deploy_hashes[1]).unwrap()
-        );
-        assert_eq!(
-            destination_txn
-                .get(*destination_db, &2usize.to_le_bytes())
-                .unwrap(),
-            bincode::serialize(&deploy_hashes[2]).unwrap()
-        );
-        assert_eq!(
-            destination_txn
-                .get(*destination_db, &DATA_COUNT.to_le_bytes())
-                .unwrap_err(),
-            LmdbError::NotFound
-        );
-        destination_txn.commit().unwrap();
-    }
-}
 
 #[test]
 fn transfer_blocks() {
-    const BLOCK_COUNT: usize = 3;
-    const DEPLOY_COUNT: usize = 4;
+    const TRANSFER_COUNT: usize = 3;
 
-    let source_fixture = LmdbTestFixture::new(
-        vec![
-            BlockHeaderDatabase::db_name(),
-            BlockBodyDatabase::db_name(),
-            DeployMetadataDatabase::db_name(),
-            DeployDatabase::db_name(),
-            TransferDatabase::db_name(),
-        ],
-        Some(STORAGE_FILE_NAME),
+    const TRANSACTION_COUNT: usize = 7;
+    let mut rng = TestRng::new();
+
+    let mut source_fixture = LmdbTestFixture::new();
+
+    let transactions: Vec<Transaction> = (0..TRANSACTION_COUNT as u8)
+        .map(|_| Transaction::random(&mut rng))
+        .collect();
+
+    let mut blocks: Vec<Block> = vec![];
+    let mut block_transactions_map: Vec<Vec<usize>> = vec![];
+    blocks.push(
+        TestBlockBuilder::new()
+            .transactions([0, 1, 2].iter().map(|i| &transactions[*i]))
+            .build(&mut rng)
+            .into(),
     );
+    block_transactions_map.push(vec![0, 1, 2]);
+    blocks.push(
+        TestBlockBuilder::new()
+            .transactions([3, 4].iter().map(|i| &transactions[*i]))
+            .build(&mut rng)
+            .into(),
+    );
+    block_transactions_map.push(vec![3, 4]);
+    blocks.push(
+        TestBlockBuilder::new()
+            .transactions([5, 6].iter().map(|i| &transactions[*i]))
+            .build(&mut rng)
+            .into(),
+    );
+    block_transactions_map.push(vec![5, 6]);
 
-    let deploy_hashes: Vec<DeployHash> = (0..DEPLOY_COUNT as u8).map(mock_deploy_hash).collect();
-    let block_headers: Vec<(BlockHash, MockBlockHeader)> =
-        (0..BLOCK_COUNT as u8).map(mock_block_header).collect();
-    let mut block_bodies = vec![];
-    let mut block_body_deploy_map: Vec<Vec<usize>> = vec![];
-    block_bodies.push(BlockBody::new(vec![
-        deploy_hashes[0],
-        deploy_hashes[1],
-        deploy_hashes[3],
-    ]));
-    block_body_deploy_map.push(vec![0, 1, 3]);
-    block_bodies.push(BlockBody::new(vec![deploy_hashes[1], deploy_hashes[2]]));
-    block_body_deploy_map.push(vec![1, 2]);
-    block_bodies.push(BlockBody::new(vec![deploy_hashes[2], deploy_hashes[3]]));
-    block_body_deploy_map.push(vec![2, 3]);
+    let exec_results: Vec<ExecutionResult> = (0..TRANSACTION_COUNT as u8)
+        .map(|_| ExecutionResult::random(&mut rng))
+        .collect();
 
-    let deploy_metadatas = vec![
-        mock_deploy_metadata(slice::from_ref(&block_headers[0].0)),
-        mock_deploy_metadata(&[block_headers[0].0, block_headers[1].0]),
-        mock_deploy_metadata(&[block_headers[1].0, block_headers[2].0]),
-        mock_deploy_metadata(&[block_headers[0].0, block_headers[2].0]),
-    ];
+    let mut rw_txn = source_fixture.block_store.checkout_rw().unwrap();
 
-    let env = &source_fixture.env;
+    // Insert the transactions in the database.
+    for transaction in transactions.iter() {
+        let _ = rw_txn.write(transaction).unwrap();
+    }
+
     // Insert the 3 blocks into the database.
-    {
-        let mut txn = env.begin_rw_txn().unwrap();
-        for i in 0..BLOCK_COUNT {
-            // Store the header.
-            txn.put(
-                *source_fixture
-                    .db(Some(BlockHeaderDatabase::db_name()))
-                    .unwrap(),
-                &block_headers[i].0,
-                &bincode::serialize(&block_headers[i].1).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-            // Store the body.
-            txn.put(
-                *source_fixture
-                    .db(Some(BlockBodyDatabase::db_name()))
-                    .unwrap(),
-                &block_headers[i].1.body_hash,
-                &bincode::serialize(&block_bodies[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
+    for (block_id, block) in blocks.iter().enumerate() {
+        let block_hash = rw_txn.write(block).unwrap();
 
-        // Insert the 4 deploys into the deploys and deploy_metadata databases.
-        for i in 0..DEPLOY_COUNT {
-            txn.put(
-                *source_fixture
-                    .db(Some(DeployMetadataDatabase::db_name()))
-                    .unwrap(),
-                &deploy_hashes[i],
-                &bincode::serialize(&deploy_metadatas[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-            // Add mock deploy data in the database.
-            txn.put(
-                *source_fixture.db(Some(DeployDatabase::db_name())).unwrap(),
-                &deploy_hashes[i],
-                &bincode::serialize(&deploy_hashes[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
+        let height = block.height();
+        let era = block.era_id();
 
-    let destination_fixture = LmdbTestFixture::new(
-        vec![
-            BlockHeaderDatabase::db_name(),
-            BlockBodyDatabase::db_name(),
-            DeployMetadataDatabase::db_name(),
-            DeployDatabase::db_name(),
-            TransferDatabase::db_name(),
-        ],
-        Some(STORAGE_FILE_NAME),
-    );
+        let block_info = BlockHashHeightAndEra::new(block_hash, height, era);
 
-    let block_hash_0 = block_headers[0].0;
-    let expected_state_root_hash = block_headers[0].1.state_root_hash;
+        let block_exec_results = BlockExecutionResults {
+            block_info,
+            exec_results: block_transactions_map[block_id]
+                .iter()
+                .map(|id| (transactions[*id].hash(), exec_results[*id].clone()))
+                .collect(),
+        };
+        rw_txn.write(&block_exec_results).unwrap();
+    }
+    rw_txn.commit().unwrap();
+
+    let destination_fixture = LmdbTestFixture::new();
+
+    let block_hash_0 = *blocks[0].hash();
+    let expected_state_root_hash = *blocks[0].state_root_hash();
     let actual_state_root_hash = storage::transfer_block_info(
         source_fixture.tmp_dir.path(),
         destination_fixture.tmp_dir.path(),
@@ -251,102 +101,49 @@ fn transfer_blocks() {
     assert_eq!(expected_state_root_hash, actual_state_root_hash);
 
     {
-        let txn = destination_fixture.env.begin_ro_txn().unwrap();
-        let actual_block_header: MockBlockHeader = txn
-            .get(
-                *destination_fixture
-                    .db(Some(BlockHeaderDatabase::db_name()))
-                    .unwrap(),
-                &block_hash_0,
-            )
-            .map(bincode::deserialize)
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual_block_header, block_headers[0].1);
+        let txn = destination_fixture.block_store.checkout_ro().unwrap();
+        let actual_block_header: Option<BlockHeader> = txn.read(block_hash_0).unwrap();
+        assert_eq!(actual_block_header, Some(blocks[0].clone_header()));
 
-        let actual_block_body: BlockBody = txn
-            .get(
-                *destination_fixture
-                    .db(Some(BlockBodyDatabase::db_name()))
-                    .unwrap(),
-                &actual_block_header.body_hash,
-            )
-            .map(bincode::deserialize)
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual_block_body, block_bodies[0]);
+        let actual_block: Option<Block> = txn.read(block_hash_0).unwrap();
+        assert_eq!(actual_block, Some(blocks[0].clone()));
 
-        for deploy_hash in actual_block_body.deploy_hashes() {
-            let actual_mock_deploy: DeployHash = txn
-                .get(
-                    *destination_fixture
-                        .db(Some(DeployDatabase::db_name()))
-                        .unwrap(),
-                    deploy_hash,
-                )
-                .map(bincode::deserialize)
-                .unwrap()
-                .unwrap();
-            assert_eq!(*deploy_hash, actual_mock_deploy);
+        for transaction_hash in actual_block.unwrap().all_transaction_hashes() {
+            // Check if the transactions are stored
+            let transaction: Option<Transaction> = txn.read(transaction_hash).unwrap();
+            assert!(transaction.is_some());
+            assert_eq!(transaction_hash, transaction.unwrap().hash());
 
-            let mut actual_deploy_metadata: DeployMetadata = txn
-                .get(
-                    *destination_fixture
-                        .db(Some(DeployMetadataDatabase::db_name()))
-                        .unwrap(),
-                    deploy_hash,
-                )
-                .map(bincode::deserialize)
-                .unwrap()
-                .unwrap();
-            assert!(actual_deploy_metadata
-                .execution_results
-                .remove(&block_hash_0)
-                .is_some());
-            assert!(actual_deploy_metadata.execution_results.is_empty());
+            let exec_result: Option<ExecutionResult> = txn.read(transaction_hash).unwrap();
+            assert!(exec_result.is_some());
         }
 
-        assert_eq!(
-            txn.get(
-                *destination_fixture
-                    .db(Some(BlockHeaderDatabase::db_name()))
-                    .unwrap(),
-                &block_headers[1].0,
-            )
-            .unwrap_err(),
-            LmdbError::NotFound
-        );
-        assert_eq!(
-            txn.get(
-                *destination_fixture
-                    .db(Some(BlockHeaderDatabase::db_name()))
-                    .unwrap(),
-                &block_headers[2].0,
-            )
-            .unwrap_err(),
-            LmdbError::NotFound
-        );
+        let block_header: Option<BlockHeader> = txn.read(*blocks[1].hash()).unwrap();
+        assert!(block_header.is_none());
+        let block_header: Option<BlockHeader> = txn.read(*blocks[2].hash()).unwrap();
+        assert!(block_header.is_none());
         txn.commit().unwrap();
     }
 
-    let block_hash_1 = block_headers[1].0;
+    let block_hash_1 = *blocks[1].hash();
+    let transfers: Vec<Transfer> = (0..TRANSFER_COUNT as u8)
+        .map(|_| Transfer::random(&mut rng))
+        .collect();
 
     // Put some mock data in the transfer DB under block hash 1.
     {
-        let mut txn = source_fixture.env.begin_rw_txn().unwrap();
-        txn.put(
-            *source_fixture
-                .db(Some(TransferDatabase::db_name()))
-                .unwrap(),
-            &block_hash_1,
-            &bincode::serialize(&block_hash_1).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
+        let mut txn = source_fixture.block_store.checkout_rw().unwrap();
+
+        let block_transfers = BlockTransfers {
+            block_hash: block_hash_1,
+            transfers: transfers.clone(),
+        };
+
+        let _ = txn.write(&block_transfers).unwrap();
         txn.commit().unwrap();
     }
 
-    let expected_state_root_hash = block_headers[1].1.state_root_hash;
+    let expected_state_root_hash = *blocks[1].state_root_hash();
     let actual_state_root_hash = storage::transfer_block_info(
         source_fixture.tmp_dir.path(),
         destination_fixture.tmp_dir.path(),
@@ -356,83 +153,29 @@ fn transfer_blocks() {
     assert_eq!(expected_state_root_hash, actual_state_root_hash);
 
     {
-        let txn = destination_fixture.env.begin_ro_txn().unwrap();
-        let actual_block_header: MockBlockHeader = txn
-            .get(
-                *destination_fixture
-                    .db(Some(BlockHeaderDatabase::db_name()))
-                    .unwrap(),
-                &block_hash_1,
-            )
-            .map(bincode::deserialize)
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual_block_header, block_headers[1].1);
+        let txn = destination_fixture.block_store.checkout_ro().unwrap();
+        let actual_block_header: Option<BlockHeader> = txn.read(block_hash_1).unwrap();
+        assert_eq!(actual_block_header, Some(blocks[1].clone_header()));
 
-        let actual_block_body: BlockBody = txn
-            .get(
-                *destination_fixture
-                    .db(Some(BlockBodyDatabase::db_name()))
-                    .unwrap(),
-                &actual_block_header.body_hash,
-            )
-            .map(bincode::deserialize)
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual_block_body, block_bodies[1]);
+        let actual_block: Option<Block> = txn.read(block_hash_1).unwrap();
+        assert_eq!(actual_block, Some(blocks[1].clone()));
 
-        let actual_mock_transfer: BlockHash = txn
-            .get(
-                *destination_fixture
-                    .db(Some(TransferDatabase::db_name()))
-                    .unwrap(),
-                &block_hash_1,
-            )
-            .map(bincode::deserialize)
-            .unwrap()
-            .unwrap();
-        assert_eq!(block_hash_1, actual_mock_transfer);
+        let actual_transfers: Option<Vec<Transfer>> = txn.read(block_hash_1).unwrap();
+        assert_eq!(Some(transfers), actual_transfers);
 
-        for deploy_hash in actual_block_body.deploy_hashes() {
-            let actual_mock_deploy: DeployHash = txn
-                .get(
-                    *destination_fixture
-                        .db(Some(DeployDatabase::db_name()))
-                        .unwrap(),
-                    deploy_hash,
-                )
-                .map(bincode::deserialize)
-                .unwrap()
-                .unwrap();
-            assert_eq!(*deploy_hash, actual_mock_deploy);
+        for transaction_hash in actual_block.unwrap().all_transaction_hashes() {
+            // Check if the transactions are stored
+            let transaction: Option<Transaction> = txn.read(transaction_hash).unwrap();
+            assert!(transaction.is_some());
+            assert_eq!(transaction_hash, transaction.unwrap().hash());
 
-            let mut actual_deploy_metadata: DeployMetadata = txn
-                .get(
-                    *destination_fixture
-                        .db(Some(DeployMetadataDatabase::db_name()))
-                        .unwrap(),
-                    deploy_hash,
-                )
-                .map(bincode::deserialize)
-                .unwrap()
-                .unwrap();
-            assert!(actual_deploy_metadata
-                .execution_results
-                .remove(&block_hash_1)
-                .is_some());
-            assert!(actual_deploy_metadata.execution_results.is_empty());
+            let exec_result: Option<ExecutionResult> = txn.read(transaction_hash).unwrap();
+            assert!(exec_result.is_some());
         }
 
-        assert_eq!(
-            txn.get(
-                *destination_fixture
-                    .db(Some(BlockHeaderDatabase::db_name()))
-                    .unwrap(),
-                &block_headers[2].0,
-            )
-            .unwrap_err(),
-            LmdbError::NotFound
-        );
+        let block_header: Option<BlockHeader> = txn.read(*blocks[2].hash()).unwrap();
+        assert!(block_header.is_none());
+
         txn.commit().unwrap();
     }
 }
@@ -444,24 +187,27 @@ fn transfer_global_state_information() {
     let max_db_size = DEFAULT_MAX_DB_SIZE
         .parse()
         .expect("should be able to parse max db size");
-    let source_env = LmdbEnvironment::new(source_tmp_dir.path(), max_db_size, 512, true).unwrap();
-    let source_store = LmdbTrieStore::new(&source_env, None, DatabaseFlags::empty()).unwrap();
+
     // Construct mock data.
     let data = create_data();
 
+    let source = create_data_access_layer(source_tmp_dir.path(), max_db_size, true).unwrap();
+
+    let source_store = source.state().trie_store();
     {
         // Put the generated data into the source trie.
-        let mut txn = source_env.create_read_write_txn().unwrap();
+        let mut txn = source
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let items = data.iter().map(Into::into);
         source_store.put_many(&mut txn, items).unwrap();
         txn.commit().unwrap();
     }
 
-    let (_source_state, _env) =
-        load_execution_engine(source_tmp_dir.path(), max_db_size, Digest::default(), true).unwrap();
-
-    let (_destination_state, dst_env) =
-        create_execution_engine(destination_tmp_dir.path(), max_db_size, true).unwrap();
+    let destination =
+        create_data_access_layer(destination_tmp_dir.path(), max_db_size, true).unwrap();
 
     // Copy from `node2`, the root of the created trie. All data under node 2,
     // which has leaf 2 and 3 under it, should be copied.
@@ -472,9 +218,13 @@ fn transfer_global_state_information() {
     )
     .unwrap();
 
-    let destination_store = LmdbTrieStore::new(&dst_env, None, DatabaseFlags::empty()).unwrap();
+    let destination_store = destination.state().trie_store(); // LmdbTrieStore::new(&dst_env, None, DatabaseFlags::empty()).unwrap();
     {
-        let txn = dst_env.create_read_write_txn().unwrap();
+        let txn = destination
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let keys = vec![data[1].0, data[2].0, data[4].0];
         let entries: Vec<Option<Trie<Bytes, Bytes>>> =
             destination_store.get_many(&txn, keys.iter()).unwrap();

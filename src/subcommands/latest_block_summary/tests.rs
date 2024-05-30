@@ -1,19 +1,14 @@
 use std::fs::{self, OpenOptions};
 
-use lmdb::{Transaction, WriteFlags};
+use casper_storage::block_store::{BlockStoreProvider, BlockStoreTransaction, DataWriter};
+use casper_types::{testing::TestRng, Block, BlockHash, BlockHeader, TestBlockBuilder};
 use once_cell::sync::Lazy;
 use tempfile::{self, NamedTempFile, TempDir};
 
-use casper_node::{
-    rpcs::docs::DocExample,
-    types::{BlockHeader, JsonBlockHeader},
-};
-
 use super::block_info::BlockInfo;
 use crate::{
-    common::db::STORAGE_FILE_NAME,
     subcommands::latest_block_summary::{block_info, read_db},
-    test_utils::{LmdbTestFixture, MockBlockHeader},
+    test_utils::LmdbTestFixture,
 };
 
 static OUT_DIR: Lazy<TempDir> = Lazy::new(|| tempfile::tempdir().unwrap());
@@ -45,9 +40,10 @@ fn parse_network_name_input() {
 
 #[test]
 fn dump_with_net_name() {
-    let json_header = JsonBlockHeader::doc_example().clone();
-    let header: BlockHeader = json_header.into();
-    let block_info = BlockInfo::new(Some("casper".to_string()), header.hash(), header);
+    let mut rng = TestRng::new();
+
+    let header: BlockHeader = TestBlockBuilder::new().build(&mut rng).take_header().into();
+    let block_info = BlockInfo::new(Some("casper".to_string()), header);
     let reference_json = serde_json::to_string_pretty(&block_info).unwrap();
 
     let out_file_path = OUT_DIR.as_ref().join("casper_network.json");
@@ -64,9 +60,10 @@ fn dump_with_net_name() {
 
 #[test]
 fn dump_without_net_name() {
-    let json_header = JsonBlockHeader::doc_example().clone();
-    let header: BlockHeader = json_header.into();
-    let block_info = BlockInfo::new(None, header.hash(), header);
+    let mut rng = TestRng::new();
+
+    let header: BlockHeader = TestBlockBuilder::new().build(&mut rng).take_header().into();
+    let block_info = BlockInfo::new(None, header);
     let reference_json = serde_json::to_string_pretty(&block_info).unwrap();
 
     let out_file_path = OUT_DIR.as_ref().join("no_net_name.json");
@@ -83,37 +80,26 @@ fn dump_without_net_name() {
 
 #[test]
 fn latest_block_should_succeed() {
-    let fixture = LmdbTestFixture::new(vec!["block_header"], Some(STORAGE_FILE_NAME));
+    let mut rng = TestRng::new();
+
+    let mut fixture = LmdbTestFixture::new();
     let out_file_path = OUT_DIR.as_ref().join("latest_block_metadata.json");
 
     // Create 2 block headers, height 0 and 1.
-    let first_block = MockBlockHeader::default();
-    let first_block_key = [0u8; 32];
+    let first_block: Block = TestBlockBuilder::new().height(0).build(&mut rng).into();
 
-    let mut second_block = MockBlockHeader::default();
-    let second_block_key = [1u8; 32];
-    second_block.height = 1;
+    let second_block: Block = TestBlockBuilder::new().height(1).build(&mut rng).into();
 
-    let env = &fixture.env;
-    let db = fixture.db(Some("block_header")).unwrap();
     // Insert the 2 blocks into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        txn.put(
-            *db,
-            &first_block_key,
-            &bincode::serialize(&first_block).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.put(
-            *db,
-            &second_block_key,
-            &bincode::serialize(&second_block).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
+
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+
+    let first_block_header = first_block.take_header();
+    let _ = rw_txn.write(&first_block_header).unwrap();
+
+    let second_block_header = second_block.take_header();
+    let second_block_hash = rw_txn.write(&second_block_header).unwrap();
+    rw_txn.commit().unwrap();
 
     // Get the latest block information and ensure it matches with the second block.
     read_db::latest_block_summary(
@@ -123,15 +109,26 @@ fn latest_block_should_succeed() {
     )
     .unwrap();
     let json_str = fs::read_to_string(&out_file_path).unwrap();
-    let block_info: BlockInfo = serde_json::from_str(&json_str).unwrap();
-    let (mock_block_header_deserialized, _network_name) = block_info.into_mock();
-    assert_eq!(mock_block_header_deserialized, second_block);
+    let latest_block_info: BlockInfo = serde_json::from_str(&json_str).unwrap();
+    let second_block_info = BlockInfo::new(
+        Some(
+            fixture
+                .tmp_dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_owned()
+                .into_string()
+                .unwrap(),
+        ),
+        second_block_header,
+    );
+    assert_eq!(latest_block_info, second_block_info);
 
     // Delete the second block from the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        txn.del(*db, &second_block_key, None).unwrap();
-        txn.commit().unwrap();
-    };
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    DataWriter::<BlockHash, BlockHeader>::delete(&mut rw_txn, second_block_hash).unwrap();
+    rw_txn.commit().unwrap();
 
     // Now latest block summary should return information about the first block.
     // Given that the output exists, another run on the same destination path should fail.
@@ -149,14 +146,26 @@ fn latest_block_should_succeed() {
     )
     .unwrap();
     let json_str = fs::read_to_string(&out_file_path).unwrap();
-    let block_info: BlockInfo = serde_json::from_str(&json_str).unwrap();
-    let (mock_block_header_deserialized, _network_name) = block_info.into_mock();
-    assert_eq!(mock_block_header_deserialized, first_block);
+    let latest_block_info: BlockInfo = serde_json::from_str(&json_str).unwrap();
+    let first_block_info = BlockInfo::new(
+        Some(
+            fixture
+                .tmp_dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_owned()
+                .into_string()
+                .unwrap(),
+        ),
+        first_block_header,
+    );
+    assert_eq!(latest_block_info, first_block_info);
 }
 
 #[test]
 fn latest_block_empty_db_should_fail() {
-    let fixture = LmdbTestFixture::new(vec!["block_header_faulty"], Some(STORAGE_FILE_NAME));
+    let fixture = LmdbTestFixture::new();
     let out_file_path = OUT_DIR.as_ref().join("empty.json");
     assert!(read_db::latest_block_summary(
         fixture.tmp_dir.as_ref(),
@@ -168,7 +177,7 @@ fn latest_block_empty_db_should_fail() {
 
 #[test]
 fn latest_block_existing_output_should_fail() {
-    let fixture = LmdbTestFixture::new(vec!["block_header_faulty"], Some(STORAGE_FILE_NAME));
+    let fixture = LmdbTestFixture::new();
     let out_file_path = OUT_DIR.as_ref().join("existing.json");
     let _ = OpenOptions::new()
         .create_new(true)

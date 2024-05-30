@@ -3,25 +3,25 @@ use std::{
     result::Result,
 };
 
-use casper_node::types::BlockBody;
+use casper_types::BlockBodyV1;
 
 use super::{Database, DeserializationError};
 
-pub struct BlockBodyDatabase;
+pub struct LegacyBlockBodyDatabase;
 
-impl Display for BlockBodyDatabase {
+impl Display for LegacyBlockBodyDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
         write!(f, "block_body")
     }
 }
 
-impl Database for BlockBodyDatabase {
+impl Database for LegacyBlockBodyDatabase {
     fn db_name() -> &'static str {
         "block_body"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: BlockBody = bincode::deserialize(bytes)?;
+        let _: BlockBodyV1 = bincode::deserialize(bytes)?;
         Ok(())
     }
 }

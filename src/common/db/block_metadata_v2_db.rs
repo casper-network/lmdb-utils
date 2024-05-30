@@ -3,25 +3,25 @@ use std::{
     result::Result,
 };
 
-use casper_types::{bytesrepr::FromBytes, DeployHash};
+use casper_types::{bytesrepr::FromBytes, BlockSignatures};
 
 use super::{Database, DeserializationError};
 
-pub struct DeployHashesDatabase;
+pub struct VersionedBlockMetadataDatabase;
 
-impl Display for DeployHashesDatabase {
+impl Display for VersionedBlockMetadataDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
-        write!(f, "deploy_hashes")
+        write!(f, "block_metadata_v2")
     }
 }
 
-impl Database for DeployHashesDatabase {
+impl Database for VersionedBlockMetadataDatabase {
     fn db_name() -> &'static str {
-        "deploy_hashes"
+        "block_metadata_v2"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: Vec<DeployHash> = FromBytes::from_bytes(bytes)?.0;
+        let _: BlockSignatures = FromBytes::from_bytes(bytes)?.0;
         Ok(())
     }
 }

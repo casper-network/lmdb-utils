@@ -3,7 +3,7 @@ use std::{
     result::Result,
 };
 
-use casper_types::Transfer;
+use casper_types::TransferV1;
 
 use super::{Database, DeserializationError};
 
@@ -21,7 +21,7 @@ impl Database for TransferDatabase {
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: Vec<Transfer> = bincode::deserialize(bytes)?;
+        let _: Vec<TransferV1> = bincode::deserialize(bytes)?;
         Ok(())
     }
 }

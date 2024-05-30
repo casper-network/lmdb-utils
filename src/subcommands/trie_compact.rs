@@ -1,7 +1,9 @@
 mod compact;
 mod helpers;
+
 #[cfg(test)]
 pub(crate) mod tests;
+
 // All code in the `utils` mod was copied from `casper-node` because it isn't available in the
 // public interface.
 mod utils;
@@ -10,15 +12,15 @@ use std::{io::Error as IoError, path::PathBuf};
 
 use anyhow::Error as AnyError;
 use clap::{Arg, ArgMatches, Command};
-use lmdb::Error as LmdbError;
 use thiserror::Error as ThisError;
 
-use casper_hashing::Digest;
-use casper_node::storage::Error as StorageError;
+use casper_storage::block_store::BlockStoreError;
+use casper_storage::global_state::error::Error as GlobalStateError;
+use casper_types::Digest;
 
 use compact::DestinationOptions;
 pub use helpers::copy_state_root;
-pub use utils::{create_execution_engine, load_execution_engine};
+pub use utils::{create_data_access_layer, load_data_access_layer};
 
 pub const COMMAND_NAME: &str = "compact-trie";
 const APPEND: &str = "append";
@@ -44,9 +46,9 @@ pub enum Error {
     /// Path cannot be created/resolved.
     #[error("Path {0} cannot be created/resolved: {1}")]
     InvalidPath(PathBuf, IoError),
-    /// Error while operating on LMDB.
-    #[error("Error while operating on LMDB: {0}")]
-    LmdbOperation(LmdbError),
+    /// Error while operating on the global state.
+    #[error("Error while operating on the global state: {0}")]
+    GlobalState(GlobalStateError),
     /// A block of specific height is missing from the storage.
     #[error("Storage database is missing block {0}")]
     MissingBlock(u64),
@@ -55,10 +57,10 @@ pub enum Error {
     OpenSourceTrie(AnyError),
     /// Error opening the block/deploys LMDB store.
     #[error("Error opening the block/deploy storage: {0}")]
-    OpenStorage(AnyError),
+    OpenStorage(BlockStoreError),
     /// Error while getting a block of specific height from storage.
     #[error("Storage error while trying to retrieve block {0}: {1}")]
-    Storage(u64, StorageError),
+    Storage(u64, BlockStoreError),
 }
 
 enum DisplayOrder {

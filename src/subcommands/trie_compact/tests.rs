@@ -1,18 +1,15 @@
 use std::fs::{self, File};
 
-use lmdb::DatabaseFlags;
+use casper_storage::block_store::lmdb::LmdbBlockStore;
+use casper_storage::global_state::store::StoreExt;
+use casper_storage::global_state::transaction_source::TransactionSource;
+use casper_storage::global_state::trie::{PointerBlock, Trie};
+use lmdb::Transaction;
 use once_cell::sync::Lazy;
 use tempfile::{tempdir, TempDir};
 
-use casper_execution_engine::storage::{
-    store::StoreExt,
-    transaction_source::{lmdb::LmdbEnvironment, Transaction, TransactionSource},
-    trie::{Pointer, PointerBlock, Trie},
-    trie_store::lmdb::LmdbTrieStore,
-};
-use casper_hashing::Digest;
-use casper_node::storage::Storage;
 use casper_types::bytesrepr::{Bytes, ToBytes};
+use casper_types::{Digest, Pointer};
 
 static DEFAULT_MAX_DB_SIZE: Lazy<usize> = Lazy::new(|| super::DEFAULT_MAX_DB_SIZE.parse().unwrap());
 
@@ -20,7 +17,7 @@ use crate::common::db::TRIE_STORE_FILE_NAME;
 
 use super::{
     compact::{self, DestinationOptions},
-    utils::{create_execution_engine, create_storage, load_execution_engine},
+    utils::create_data_access_layer,
     Error,
 };
 
@@ -95,13 +92,19 @@ pub(crate) fn create_data() -> Vec<TestData<Bytes, Bytes>> {
 
 fn create_test_trie_store() -> (TempDir, Vec<TestData<Bytes, Bytes>>) {
     let tmp_dir = tempdir().unwrap();
-    let env = LmdbEnvironment::new(tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, 512, true).unwrap();
-    let store = LmdbTrieStore::new(&env, None, DatabaseFlags::empty()).unwrap();
+
+    let source = create_data_access_layer(tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
+    let store = source.state().trie_store();
+
     let data = create_data();
 
     {
         // Put the generated data into the source trie.
-        let mut txn = env.create_read_write_txn().unwrap();
+        let mut txn = source
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let items = data.iter().map(Into::into);
         store.put_many(&mut txn, items).unwrap();
         txn.commit().unwrap();
@@ -110,9 +113,9 @@ fn create_test_trie_store() -> (TempDir, Vec<TestData<Bytes, Bytes>>) {
     (tmp_dir, data)
 }
 
-fn create_empty_test_storage() -> (TempDir, Storage) {
+fn create_empty_test_storage() -> (TempDir, LmdbBlockStore) {
     let tmp_dir = tempdir().unwrap();
-    let storage = create_storage(tmp_dir.as_ref()).unwrap();
+    let storage = LmdbBlockStore::new(tmp_dir.as_ref(), *DEFAULT_MAX_DB_SIZE).unwrap();
     (tmp_dir, storage)
 }
 
@@ -120,37 +123,36 @@ fn create_empty_test_storage() -> (TempDir, Storage) {
 fn copy_state_root_roundtrip() {
     let src_tmp_dir = tempdir().unwrap();
     let dst_tmp_dir = tempdir().unwrap();
-    let src_env =
-        LmdbEnvironment::new(src_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, 512, true).unwrap();
-    let src_store = LmdbTrieStore::new(&src_env, None, DatabaseFlags::empty()).unwrap();
     // Construct mock data.
     let data = create_data();
 
+    let source = create_data_access_layer(src_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
+    let src_store = source.state().trie_store();
     {
         // Put the generated data into the source trie.
-        let mut txn = src_env.create_read_write_txn().unwrap();
+        let mut txn = source
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let items = data.iter().map(Into::into);
         src_store.put_many(&mut txn, items).unwrap();
         txn.commit().unwrap();
     }
 
-    let (source_state, _env) = load_execution_engine(
-        src_tmp_dir.path(),
-        *DEFAULT_MAX_DB_SIZE,
-        Digest::default(),
-        true,
-    )
-    .unwrap();
-
-    let (destination_state, dst_env) =
-        create_execution_engine(dst_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
+    let destination =
+        create_data_access_layer(dst_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
 
     // Copy from `node1`, the root of the created trie. All data should be copied.
-    super::helpers::copy_state_root(data[3].0, &source_state, &destination_state).unwrap();
+    super::helpers::copy_state_root(data[3].0, &source, &destination).unwrap();
 
-    let dst_store = LmdbTrieStore::new(&dst_env, None, DatabaseFlags::empty()).unwrap();
+    let dst_store = destination.state().trie_store();
     {
-        let txn = dst_env.create_read_write_txn().unwrap();
+        let txn = destination
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let keys: Vec<_> = data.iter().map(|test_data| test_data.0).collect();
         let entries: Vec<Option<Trie<Bytes, Bytes>>> =
             dst_store.get_many(&txn, keys.iter()).unwrap();
@@ -180,37 +182,36 @@ fn copy_state_root_roundtrip() {
 fn check_no_extra_tries() {
     let src_tmp_dir = tempdir().unwrap();
     let dst_tmp_dir = tempdir().unwrap();
-    let src_env =
-        LmdbEnvironment::new(src_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, 512, true).unwrap();
-    let src_store = LmdbTrieStore::new(&src_env, None, DatabaseFlags::empty()).unwrap();
     // Construct mock data.
     let data = create_data();
 
+    let source = create_data_access_layer(src_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
+    let src_store = source.state().trie_store();
     {
         // Put the generated data into the source trie.
-        let mut txn = src_env.create_read_write_txn().unwrap();
+        let mut txn = source
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let items = data.iter().map(Into::into);
         src_store.put_many(&mut txn, items).unwrap();
         txn.commit().unwrap();
     }
 
-    let (source_state, _env) = load_execution_engine(
-        src_tmp_dir.path(),
-        *DEFAULT_MAX_DB_SIZE,
-        Digest::default(),
-        true,
-    )
-    .unwrap();
-
-    let (destination_state, dst_env) =
-        create_execution_engine(dst_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
+    let destination =
+        create_data_access_layer(dst_tmp_dir.path(), *DEFAULT_MAX_DB_SIZE, true).unwrap();
 
     // Check with `node2`, which only has `leaf1` and `leaf2` as children in the constructed trie.
-    super::helpers::copy_state_root(data[4].0, &source_state, &destination_state).unwrap();
+    super::helpers::copy_state_root(data[4].0, &source, &destination).unwrap();
 
-    let dst_store = LmdbTrieStore::new(&dst_env, None, DatabaseFlags::empty()).unwrap();
+    let dst_store = destination.state().trie_store();
     {
-        let txn = dst_env.create_read_write_txn().unwrap();
+        let txn = destination
+            .state()
+            .environment()
+            .create_read_write_txn()
+            .unwrap();
         let data_keys: Vec<_> = data.iter().map(|test_data| test_data.0).collect();
         // `TestData` objects `[leaf2, leaf3, node2]` which should be included in the search result.
         let mut included_data = vec![data[1].clone(), data[2].clone(), data[4].clone()];

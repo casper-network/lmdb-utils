@@ -3,26 +3,26 @@ use std::{
     result::Result,
 };
 
-use casper_hashing::Digest;
+use casper_storage::block_store::types::ApprovalsHashes;
 use casper_types::bytesrepr::FromBytes;
 
 use super::{Database, DeserializationError};
 
-pub struct BlockBodyMerkleDatabase;
+pub struct VersionedApprovalsHashesDatabase;
 
-impl Display for BlockBodyMerkleDatabase {
+impl Display for VersionedApprovalsHashesDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
-        write!(f, "block_body_merkle")
+        write!(f, "versioned_approvals_hashes")
     }
 }
 
-impl Database for BlockBodyMerkleDatabase {
+impl Database for VersionedApprovalsHashesDatabase {
     fn db_name() -> &'static str {
-        "block_body_merkle"
+        "versioned_approvals_hashes"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: (Digest, Digest) = FromBytes::from_bytes(bytes)?.0;
+        let _: ApprovalsHashes = FromBytes::from_bytes(bytes)?.0;
         Ok(())
     }
 }

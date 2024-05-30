@@ -4,25 +4,25 @@ use std::{
     result::Result,
 };
 
-use casper_types::Approval;
+use casper_types::{bytesrepr::FromBytes, Approval};
 
 use super::{Database, DeserializationError};
 
-pub struct FinalizedApprovalsDatabase;
+pub struct VersionedFinalizedApprovalsDatabase;
 
-impl Display for FinalizedApprovalsDatabase {
+impl Display for VersionedFinalizedApprovalsDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
-        write!(f, "finalized_approvals")
+        write!(f, "versioned_finalized_approvals")
     }
 }
 
-impl Database for FinalizedApprovalsDatabase {
+impl Database for VersionedFinalizedApprovalsDatabase {
     fn db_name() -> &'static str {
-        "finalized_approvals"
+        "versioned_finalized_approvals"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: BTreeSet<Approval> = bincode::deserialize(bytes)?;
+        let _: BTreeSet<Approval> = FromBytes::from_bytes(bytes)?.0;
         Ok(())
     }
 }

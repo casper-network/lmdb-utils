@@ -1,20 +1,22 @@
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    slice,
 };
 
-use casper_node::types::{BlockHash, DeployHash};
+use casper_storage::block_store::{
+    types::{BlockExecutionResults, BlockHashHeightAndEra},
+    BlockStoreProvider, BlockStoreTransaction, DataWriter,
+};
 use casper_types::bytesrepr::ToBytes;
-use lmdb::{Transaction, WriteFlags};
+use casper_types::{
+    execution::ExecutionResult, testing::TestRng, Block, TestBlockBuilder, Transaction,
+};
 use once_cell::sync::Lazy;
 use rand::Rng;
 use tempfile::{self, TempDir};
 
 use crate::{
-    common::db::{Database, DeployMetadataDatabase, STORAGE_FILE_NAME},
     subcommands::execution_results_summary::{
-        block_body::BlockBody,
         read_db,
         summary::{
             chunk_count_after_partition, summarize_map, CollectionStatistics,
@@ -22,7 +24,7 @@ use crate::{
         },
         Error,
     },
-    test_utils::{self, LmdbTestFixture, MockBlockHeader},
+    test_utils::{self, LmdbTestFixture},
 };
 
 static OUT_DIR: Lazy<TempDir> = Lazy::new(|| tempfile::tempdir().unwrap());
@@ -146,6 +148,7 @@ fn empty_execution_results_stats() {
 
 #[test]
 fn different_execution_results_stats_feed() {
+    let mut rng = TestRng::new();
     let mut stats = ExecutionResultsStats::default();
     let mut bincode_sizes = vec![];
     let mut bytesrepr_sizes = vec![];
@@ -153,7 +156,7 @@ fn different_execution_results_stats_feed() {
     for i in 1..4 {
         let mut execution_results = vec![];
         for _ in 0..(10 * i) {
-            execution_results.push(test_utils::success_execution_result());
+            execution_results.push(test_utils::success_execution_result(&mut rng));
         }
         bincode_sizes.push(bincode::serialized_size(&execution_results).unwrap() as usize);
         bytesrepr_sizes.push(chunk_count_after_partition(
@@ -180,20 +183,22 @@ fn different_execution_results_stats_feed() {
 
 #[test]
 fn identical_execution_results_stats_feed() {
+    let mut rng = TestRng::new();
     let mut stats = ExecutionResultsStats::default();
     let mut bincode_sizes = vec![];
     let mut bytesrepr_sizes = vec![];
 
+    let mut execution_results = vec![];
+    for _ in 0..10 {
+        execution_results.push(test_utils::success_execution_result(&mut rng));
+    }
+
     for _ in 1..4 {
-        let mut execution_results = vec![];
-        for _ in 0..10 {
-            execution_results.push(test_utils::success_execution_result());
-        }
         bincode_sizes.push(bincode::serialized_size(&execution_results).unwrap() as usize);
         bytesrepr_sizes.push(chunk_count_after_partition(
             execution_results.serialized_length(),
         ));
-        stats.feed(execution_results).unwrap();
+        stats.feed(execution_results.clone()).unwrap();
     }
     assert_eq!(stats.execution_results_size.len(), 1);
     assert_eq!(stats.chunk_count.len(), 1);
@@ -224,75 +229,69 @@ fn identical_execution_results_stats_feed() {
 
 #[test]
 fn execution_results_stats_should_succeed() {
-    const BLOCK_COUNT: usize = 3;
-    const DEPLOY_COUNT: usize = 4;
+    const TRANSACTION_COUNT: usize = 7;
 
-    let fixture = LmdbTestFixture::new(
-        vec!["block_header", "block_body", "deploy_metadata"],
-        Some(STORAGE_FILE_NAME),
-    );
+    let mut rng = TestRng::new();
+
+    let mut fixture = LmdbTestFixture::new();
     let out_file_path = OUT_DIR.as_ref().join("execution_results_summary.json");
 
-    let deploy_hashes: Vec<DeployHash> = (0..DEPLOY_COUNT as u8)
-        .map(test_utils::mock_deploy_hash)
+    let transactions: Vec<Transaction> = (0..TRANSACTION_COUNT as u8)
+        .map(|_| Transaction::random(&mut rng))
         .collect();
-    let block_headers: Vec<(BlockHash, MockBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_block_header)
+
+    let mut blocks: Vec<Block> = vec![];
+    let mut block_transactions_map: Vec<Vec<usize>> = vec![];
+    blocks.push(
+        TestBlockBuilder::new()
+            .transactions([0, 1, 2].iter().map(|i| &transactions[*i]))
+            .build(&mut rng)
+            .into(),
+    );
+    block_transactions_map.push(vec![0, 1, 2]);
+    blocks.push(
+        TestBlockBuilder::new()
+            .transactions([3, 4].iter().map(|i| &transactions[*i]))
+            .build(&mut rng)
+            .into(),
+    );
+    block_transactions_map.push(vec![3, 4]);
+    blocks.push(
+        TestBlockBuilder::new()
+            .transactions([5, 6].iter().map(|i| &transactions[*i]))
+            .build(&mut rng)
+            .into(),
+    );
+    block_transactions_map.push(vec![5, 6]);
+
+    let exec_results: Vec<ExecutionResult> = (0..TRANSACTION_COUNT as u8)
+        .map(|_| ExecutionResult::random(&mut rng))
         .collect();
-    let mut block_bodies = vec![];
-    let mut block_body_deploy_map: Vec<Vec<usize>> = vec![];
-    block_bodies.push(BlockBody::new(vec![
-        deploy_hashes[0],
-        deploy_hashes[1],
-        deploy_hashes[3],
-    ]));
-    block_body_deploy_map.push(vec![0, 1, 3]);
-    block_bodies.push(BlockBody::new(vec![deploy_hashes[1], deploy_hashes[2]]));
-    block_body_deploy_map.push(vec![1, 2]);
-    block_bodies.push(BlockBody::new(vec![deploy_hashes[2], deploy_hashes[3]]));
-    block_body_deploy_map.push(vec![2, 3]);
 
-    let deploy_metadatas = vec![
-        test_utils::mock_deploy_metadata(slice::from_ref(&block_headers[0].0)),
-        test_utils::mock_deploy_metadata(&[block_headers[0].0, block_headers[1].0]),
-        test_utils::mock_deploy_metadata(&[block_headers[1].0, block_headers[2].0]),
-        test_utils::mock_deploy_metadata(&[block_headers[0].0, block_headers[2].0]),
-    ];
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
 
-    let env = &fixture.env;
-    // Insert the 3 blocks into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for i in 0..BLOCK_COUNT {
-            // Store the header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                &block_headers[i].0,
-                &bincode::serialize(&block_headers[i].1).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-            // Store the body.
-            txn.put(
-                *fixture.db(Some("block_body")).unwrap(),
-                &block_headers[i].1.body_hash,
-                &bincode::serialize(&block_bodies[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
+    for transaction in transactions.iter() {
+        let _ = rw_txn.write(transaction).unwrap();
+    }
 
-        // Insert the 4 deploys into the database.
-        for i in 0..DEPLOY_COUNT {
-            txn.put(
-                *fixture.db(Some("deploy_metadata")).unwrap(),
-                &deploy_hashes[i],
-                &bincode::serialize(&deploy_metadatas[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
+    for (block_id, block) in blocks.iter().enumerate() {
+        let block_hash = rw_txn.write(block).unwrap();
+
+        let height = block.height();
+        let era = block.era_id();
+
+        let block_info = BlockHashHeightAndEra::new(block_hash, height, era);
+
+        let block_exec_results = BlockExecutionResults {
+            block_info,
+            exec_results: block_transactions_map[block_id]
+                .iter()
+                .map(|id| (transactions[*id].hash(), exec_results[*id].clone()))
+                .collect(),
+        };
+        rw_txn.write(&block_exec_results).unwrap();
+    }
+    rw_txn.commit().unwrap();
 
     // Get the execution results summary and ensure it matches with the
     // expected statistics.
@@ -308,17 +307,10 @@ fn execution_results_stats_should_succeed() {
 
     // Construct the expected statistics.
     let mut stats = ExecutionResultsStats::default();
-    for (block_idx, (block_hash, _block_header)) in block_headers.iter().enumerate() {
-        let _block_body = &block_bodies[block_idx];
+    for (block_idx, _block) in blocks.iter().enumerate() {
         let mut execution_results = vec![];
-        for metadata_idx in &block_body_deploy_map[block_idx] {
-            execution_results.push(
-                deploy_metadatas[*metadata_idx]
-                    .execution_results
-                    .get(block_hash)
-                    .unwrap()
-                    .clone(),
-            );
+        for exec_result_idx in &block_transactions_map[block_idx] {
+            execution_results.push(exec_results[*exec_result_idx].clone());
         }
         stats.feed(execution_results).unwrap();
     }
@@ -327,117 +319,8 @@ fn execution_results_stats_should_succeed() {
 }
 
 #[test]
-fn execution_results_summary_invalid_key_should_fail() {
-    let fixture = LmdbTestFixture::new(
-        vec!["block_header", "block_body", "deploy_metadata"],
-        Some(STORAGE_FILE_NAME),
-    );
-    let out_file_path = OUT_DIR.as_ref().join("invalid_key.json");
-
-    let env = &fixture.env;
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        let (_, block_header) = test_utils::mock_block_header(0);
-        let bogus_hash = [0u8; 1];
-        // Insert a block header in the database with a key that can't be
-        // deserialized.
-        txn.put(
-            *fixture.db(Some("block_header")).unwrap(),
-            &bogus_hash,
-            &bincode::serialize(&block_header).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
-
-    match read_db::execution_results_summary(
-        fixture.tmp_dir.as_ref(),
-        Some(out_file_path.as_path()),
-        false,
-    ) {
-        Err(Error::InvalidKey(idx)) => assert_eq!(idx, 0),
-        Err(error) => panic!("Got unexpected error: {error:?}"),
-        Ok(_) => panic!("Command unexpectedly succeeded"),
-    }
-}
-
-#[test]
-fn execution_results_summary_parsing_should_fail() {
-    let fixture = LmdbTestFixture::new(
-        vec!["block_header", "block_body", "deploy_metadata"],
-        Some(STORAGE_FILE_NAME),
-    );
-    let out_file_path = OUT_DIR.as_ref().join("parsing.json");
-
-    let deploy_hash = test_utils::mock_deploy_hash(0);
-    let (block_hash, block_header) = test_utils::mock_block_header(0);
-    let block_body = BlockBody::new(vec![deploy_hash]);
-
-    let env = &fixture.env;
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        // Store the header.
-        txn.put(
-            *fixture.db(Some("block_header")).unwrap(),
-            &block_hash,
-            &bincode::serialize(&block_header).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        // Store the body.
-        txn.put(
-            *fixture.db(Some("block_body")).unwrap(),
-            &block_header.body_hash,
-            &bincode::serialize(&block_body).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        // Store a bogus metadata under the deploy hash key we used before.
-        txn.put(
-            *fixture.db(Some("deploy_metadata")).unwrap(),
-            &deploy_hash,
-            &"bogus_deploy_metadata".to_bytes().unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
-
-    match read_db::execution_results_summary(
-        fixture.tmp_dir.as_ref(),
-        Some(out_file_path.as_path()),
-        false,
-    ) {
-        Err(Error::Parsing(hash, db_name, _bincode_err)) => {
-            assert_eq!(hash, block_hash);
-            assert_eq!(db_name, DeployMetadataDatabase::db_name());
-        }
-        Err(error) => panic!("Got unexpected error: {error:?}"),
-        Ok(_) => panic!("Command unexpectedly succeeded"),
-    }
-}
-
-#[test]
-fn execution_results_summary_bogus_db_should_fail() {
-    let fixture = LmdbTestFixture::new(vec!["bogus"], Some(STORAGE_FILE_NAME));
-    let out_file_path = OUT_DIR.as_ref().join("bogus_db.json");
-
-    match read_db::execution_results_summary(
-        fixture.tmp_dir.as_ref(),
-        Some(out_file_path.as_path()),
-        false,
-    ) {
-        Err(Error::Database(_)) => { /* expected result */ }
-        Err(error) => panic!("Got unexpected error: {error:?}"),
-        Ok(_) => panic!("Command unexpectedly succeeded"),
-    }
-}
-
-#[test]
 fn execution_results_summary_existing_output_should_fail() {
-    let fixture = LmdbTestFixture::new(
-        vec!["block_header", "block_body", "deploy_metadata"],
-        Some(STORAGE_FILE_NAME),
-    );
+    let fixture = LmdbTestFixture::new();
     let out_file_path = OUT_DIR.as_ref().join("existing.json");
     let _ = OpenOptions::new()
         .create_new(true)

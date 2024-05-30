@@ -1,909 +1,826 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use casper_node::types::BlockHash;
-use casper_types::{ProtocolVersion, Signature, U512};
-use lmdb::{Error as LmdbError, Transaction, WriteFlags};
+use casper_storage::block_store::{
+    lmdb::IndexedLmdbBlockStore, BlockStoreProvider, BlockStoreTransaction, DataReader, DataWriter,
+};
+use casper_types::{
+    testing::TestRng, Block, BlockHash, BlockHeaderV2, BlockSignatures, BlockSignaturesV2, BlockV2,
+    ChainNameDigest, Digest, EraEndV2, ProtocolVersion, PublicKey, Signature, TestBlockBuilder,
+    U512,
+};
+use once_cell::sync::OnceCell;
 
 use crate::{
     subcommands::purge_signatures::{
-        block_signatures::BlockSignatures,
         purge::{initialize_indices, purge_signatures_for_blocks, EraWeights},
         Error,
     },
-    test_utils::{self, LmdbTestFixture, MockBlockHeader, MockSwitchBlockHeader, KEYS},
+    test_utils::{LmdbTestFixture, KEYS},
 };
 
-// Gets and deserializes a `BlockSignatures` structure from the block
+// Gets a `BlockSignatures` structure from the block
 // signatures database.
-fn get_sigs_from_db<T: Transaction>(
-    txn: &T,
-    fixture: &LmdbTestFixture,
+fn get_sigs_from_db(
+    txn: &impl DataReader<BlockHash, BlockSignatures>,
     block_hash: &BlockHash,
 ) -> BlockSignatures {
-    let serialized_sigs = txn
-        .get(*fixture.db(Some("block_metadata")).unwrap(), block_hash)
-        .unwrap();
-    let block_sigs: BlockSignatures = bincode::deserialize(serialized_sigs).unwrap();
-    assert_eq!(block_sigs.block_hash, *block_hash);
+    let block_sigs: BlockSignatures = txn.read(*block_hash).unwrap().unwrap();
+    assert_eq!(*block_sigs.block_hash(), *block_hash);
     block_sigs
 }
 
 #[test]
 fn indices_initialization() {
-    const BLOCK_COUNT: usize = 4;
-    const SWITCH_BLOCK_COUNT: usize = 2;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
 
-    let fixture = LmdbTestFixture::new(vec!["block_header"], None);
+    // Create mock blocks and set an era and height for each one.
+    let mut blocks: Vec<Block> = vec![];
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(100)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(200)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(300)
+            .era(20)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(400)
+            .era(20)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
 
-    // Create mock block headers.
-    let mut block_headers: Vec<(BlockHash, MockBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_block_header)
-        .collect();
-    // Set an era and height for each one.
-    block_headers[0].1.era_id = 10.into();
-    block_headers[0].1.height = 100;
-    block_headers[1].1.era_id = 10.into();
-    block_headers[1].1.height = 200;
-    block_headers[2].1.era_id = 20.into();
-    block_headers[2].1.height = 300;
-    block_headers[3].1.era_id = 20.into();
-    block_headers[3].1.height = 400;
-    // Create mock switch blocks for each era.
-    let mut switch_block_headers: Vec<(BlockHash, MockSwitchBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_switch_block_header)
-        .collect();
-    // Set an appropriate era and height for each one.
-    switch_block_headers[0].1.era_id = block_headers[0].1.era_id - 1;
-    switch_block_headers[0].1.height = 80;
-    switch_block_headers[1].1.era_id = block_headers[2].1.era_id - 1;
-    switch_block_headers[1].1.height = 280;
+    // Create mock switch blocks for each era and set an appropriate era and height for each one.
+    let mut switch_blocks: Vec<Block> = vec![];
+    switch_blocks.push(
+        TestBlockBuilder::new()
+            .height(80)
+            .era(blocks[0].era_id() - 1)
+            .switch_block(true)
+            .build(&mut rng)
+            .into(),
+    );
+    switch_blocks.push(
+        TestBlockBuilder::new()
+            .height(280)
+            .era(blocks[2].era_id() - 1)
+            .switch_block(true)
+            .build(&mut rng)
+            .into(),
+    );
 
-    let env = &fixture.env;
     // Insert the blocks into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for (block_hash, block_header) in block_headers.iter().take(BLOCK_COUNT) {
-            // Store the block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(&block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        for (block_hash, block_header) in switch_block_headers.iter().take(SWITCH_BLOCK_COUNT) {
-            // Store the switch block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    for block in blocks.iter() {
+        let _ = rw_txn.write(block).unwrap();
+    }
+    for switch_block in switch_blocks.iter() {
+        let _ = rw_txn.write(switch_block).unwrap();
+    }
+    rw_txn.commit().unwrap();
 
-    let indices = initialize_indices(env, &BTreeSet::from([100, 200, 300])).unwrap();
+    let (block_store, _store_dir) = fixture.destructure();
+    let block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+
+    let ro_txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&ro_txn, &BTreeSet::from([100, 200, 300])).unwrap();
+    ro_txn.commit().unwrap();
+
     // Make sure we have the relevant blocks in the indices.
     assert_eq!(
-        indices.heights.get(&block_headers[0].1.height).unwrap().0,
-        block_headers[0].0
+        indices.heights.get(&blocks[0].height()).unwrap().0,
+        *blocks[0].hash()
     );
     assert_eq!(
-        indices.heights.get(&block_headers[1].1.height).unwrap().0,
-        block_headers[1].0
+        indices.heights.get(&blocks[1].height()).unwrap().0,
+        *blocks[1].hash()
     );
     assert_eq!(
-        indices.heights.get(&block_headers[2].1.height).unwrap().0,
-        block_headers[2].0
+        indices.heights.get(&blocks[2].height()).unwrap().0,
+        *blocks[2].hash()
     );
     // And that the irrelevant ones are not included.
-    assert!(!indices.heights.contains_key(&block_headers[3].1.height));
+    assert!(!indices.heights.contains_key(&blocks[3].height()));
     // Make sure we got all the switch blocks.
     assert_eq!(
-        *indices
-            .switch_blocks
-            .get(&block_headers[0].1.era_id)
-            .unwrap(),
-        switch_block_headers[0].0
+        *indices.switch_blocks.get(&blocks[0].era_id()).unwrap(),
+        *switch_blocks[0].hash()
     );
     assert_eq!(
-        *indices
-            .switch_blocks
-            .get(&block_headers[2].1.era_id)
-            .unwrap(),
-        switch_block_headers[1].0
+        *indices.switch_blocks.get(&blocks[2].era_id()).unwrap(),
+        *switch_blocks[1].hash()
     );
-
-    // Test for a header with a height which we already have in the db.
-    let (duplicate_hash, mut duplicate_header) = test_utils::mock_block_header(4);
-    duplicate_header.height = block_headers[0].1.height;
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        // Store the header with duplicated height.
-        txn.put(
-            *fixture.db(Some("block_header")).unwrap(),
-            &duplicate_hash,
-            &bincode::serialize(&duplicate_header).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
-
-    match initialize_indices(env, &BTreeSet::from([100, 200, 300])) {
-        Err(Error::DuplicateBlock(height)) => assert_eq!(height, block_headers[0].1.height),
-        _ => panic!("Unexpected error"),
-    }
 }
 
 #[test]
 fn indices_initialization_with_upgrade() {
-    const BLOCK_COUNT: usize = 4;
-    const SWITCH_BLOCK_COUNT: usize = 4;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
+    // Create mock blocks and set an era and height for each one.
+    let mut blocks: Vec<Block> = vec![];
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(80)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(200)
+            .era(11)
+            .switch_block(false)
+            .protocol_version(ProtocolVersion::from_parts(1, 1, 0))
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(290)
+            .era(12)
+            .switch_block(false)
+            .protocol_version(ProtocolVersion::from_parts(2, 0, 0))
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(350)
+            .era(13)
+            .switch_block(false)
+            .protocol_version(ProtocolVersion::from_parts(2, 0, 0))
+            .build(&mut rng)
+            .into(),
+    );
 
-    let fixture = LmdbTestFixture::new(vec!["block_header"], None);
-    // Create mock block headers.
-    let mut block_headers: Vec<(BlockHash, MockBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_block_header)
-        .collect();
-    // Set an era and height for each one.
-    block_headers[0].1.era_id = 10.into();
-    block_headers[0].1.height = 80;
+    // Create mock switch blocks for each era and set an appropriate era and height for each one.
+    let mut switch_blocks: Vec<Block> = vec![];
+    switch_blocks.push(
+        TestBlockBuilder::new()
+            .height(60)
+            .era(blocks[0].era_id() - 1)
+            .switch_block(true)
+            .build(&mut rng)
+            .into(),
+    );
+    switch_blocks.push(
+        TestBlockBuilder::new()
+            .height(180)
+            .era(blocks[1].era_id() - 1)
+            .switch_block(true)
+            .build(&mut rng)
+            .into(),
+    );
+    switch_blocks.push(
+        TestBlockBuilder::new()
+            .height(250)
+            .era(blocks[2].era_id() - 1)
+            .switch_block(true)
+            .protocol_version(ProtocolVersion::from_parts(1, 1, 0))
+            .build(&mut rng)
+            .into(),
+    );
+    switch_blocks.push(
+        TestBlockBuilder::new()
+            .height(300)
+            .era(blocks[3].era_id() - 1)
+            .switch_block(true)
+            .protocol_version(ProtocolVersion::from_parts(2, 0, 0))
+            .build(&mut rng)
+            .into(),
+    );
 
-    block_headers[1].1.era_id = 11.into();
-    block_headers[1].1.height = 200;
-    block_headers[2].1.protocol_version = ProtocolVersion::from_parts(1, 1, 0);
-
-    block_headers[2].1.era_id = 12.into();
-    block_headers[2].1.height = 290;
-    block_headers[2].1.protocol_version = ProtocolVersion::from_parts(2, 0, 0);
-
-    block_headers[3].1.era_id = 13.into();
-    block_headers[3].1.height = 350;
-    block_headers[3].1.protocol_version = ProtocolVersion::from_parts(2, 0, 0);
-
-    // Create mock switch blocks.
-    let mut switch_block_headers: Vec<(BlockHash, MockSwitchBlockHeader)> = (0..SWITCH_BLOCK_COUNT
-        as u8)
-        .map(test_utils::mock_switch_block_header)
-        .collect();
-    // Set an appropriate era and height for each one.
-    switch_block_headers[0].1.era_id = block_headers[0].1.era_id - 1;
-    switch_block_headers[0].1.height = 60;
-
-    switch_block_headers[1].1.era_id = block_headers[1].1.era_id - 1;
-    switch_block_headers[1].1.height = 180;
-
-    switch_block_headers[2].1.era_id = block_headers[2].1.era_id - 1;
-    switch_block_headers[2].1.height = 250;
-    switch_block_headers[2].1.protocol_version = ProtocolVersion::from_parts(1, 1, 0);
-
-    switch_block_headers[3].1.height = 300;
-    switch_block_headers[3].1.protocol_version = ProtocolVersion::from_parts(2, 0, 0);
-
-    let env = &fixture.env;
     // Insert the blocks into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for (block_hash, block_header) in block_headers.iter().take(BLOCK_COUNT) {
-            // Store the block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(&block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        for (block_hash, block_header) in switch_block_headers.iter().take(SWITCH_BLOCK_COUNT) {
-            // Store the switch block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    for block in blocks.iter() {
+        let _ = rw_txn.write(block).unwrap();
+    }
+    for switch_block in switch_blocks.iter() {
+        let _ = rw_txn.write(switch_block).unwrap();
+    }
+    rw_txn.commit().unwrap();
 
-    let indices = initialize_indices(env, &BTreeSet::from([100, 200, 300])).unwrap();
+    let (block_store, _store_dir) = fixture.destructure();
+    let block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+
+    let ro_txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&ro_txn, &BTreeSet::from([100, 200, 300])).unwrap();
     assert!(!indices
         .switch_blocks_before_upgrade
-        .contains(&switch_block_headers[0].1.height));
+        .contains(&switch_blocks[0].height()));
     assert!(indices
         .switch_blocks_before_upgrade
-        .contains(&switch_block_headers[1].1.height));
+        .contains(&switch_blocks[1].height()));
     assert!(indices
         .switch_blocks_before_upgrade
-        .contains(&switch_block_headers[2].1.height));
+        .contains(&switch_blocks[2].height()));
     assert!(!indices
         .switch_blocks_before_upgrade
-        .contains(&switch_block_headers[3].1.height));
+        .contains(&switch_blocks[3].height()));
+}
+
+fn new_switch_block_with_weights(
+    rng: &mut TestRng,
+    era_id: u64,
+    height: u64,
+    weights: &[(PublicKey, U512)],
+    protocol_version: Option<ProtocolVersion>,
+) -> Block {
+    let switch_block = TestBlockBuilder::new()
+        .height(height)
+        .era(era_id)
+        .switch_block(true)
+        .build(rng);
+
+    let next_era_weights: BTreeMap<PublicKey, U512> = weights.iter().cloned().collect();
+    let era_end = EraEndV2::new(vec![], vec![], next_era_weights, BTreeMap::new(), 1);
+
+    let switch_block_header = switch_block.header().clone();
+    let switch_block_header = BlockHeaderV2::new(
+        *switch_block_header.parent_hash(),
+        *switch_block_header.state_root_hash(),
+        *switch_block_header.body_hash(),
+        switch_block_header.random_bit(),
+        *switch_block_header.accumulated_seed(),
+        Some(era_end),
+        switch_block_header.timestamp(),
+        switch_block_header.era_id(),
+        switch_block_header.height(),
+        protocol_version.unwrap_or(switch_block_header.protocol_version()),
+        switch_block_header.proposer().clone(),
+        switch_block_header.current_gas_price(),
+        switch_block_header.last_switch_block_hash(),
+        OnceCell::new(),
+    );
+
+    Block::from(BlockV2::new_from_header_and_body(
+        switch_block_header,
+        switch_block.take_body(),
+    ))
 }
 
 #[test]
 fn era_weights() {
-    const SWITCH_BLOCK_COUNT: usize = 2;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
 
-    let fixture = LmdbTestFixture::new(vec!["block_header"], None);
-    // Create mock switch block headers.
-    let mut switch_block_headers: Vec<(BlockHash, MockSwitchBlockHeader)> = (0..SWITCH_BLOCK_COUNT
-        as u8)
-        .map(test_utils::mock_switch_block_header)
-        .collect();
-    // Set an era and height for each one.
-    switch_block_headers[0].1.era_id = 10.into();
-    switch_block_headers[0].1.height = 80;
-    // Insert some weight for the next era weights.
-    switch_block_headers[0]
-        .1
-        .era_end
-        .as_mut()
-        .unwrap()
-        .next_era_validator_weights
-        .insert(KEYS[0].clone(), 100.into());
-    // Set an era and height for each one.
-    switch_block_headers[1].1.era_id = 20.into();
-    switch_block_headers[1].1.height = 280;
-    // Insert some weight for the next era weights.
-    switch_block_headers[1]
-        .1
-        .era_end
-        .as_mut()
-        .unwrap()
-        .next_era_validator_weights
-        .insert(KEYS[1].clone(), 100.into());
+    // Create mock switch blocks for each era and set an appropriate era and height for each one.
+    let mut switch_blocks: Vec<Block> = vec![];
 
-    let env = &fixture.env;
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        10,
+        80,
+        &[(KEYS[0].clone(), 100.into())],
+        None,
+    ));
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        20,
+        280,
+        &[(KEYS[1].clone(), 100.into())],
+        None,
+    ));
+
     // Insert the blocks into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for (block_hash, block_header) in switch_block_headers.iter().take(SWITCH_BLOCK_COUNT) {
-            // Store the switch block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
-    let indices = initialize_indices(env, &BTreeSet::from([80])).unwrap();
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    for switch_block in switch_blocks.iter() {
+        let _ = rw_txn.write(switch_block).unwrap();
+    }
+    rw_txn.commit().unwrap();
+
+    let (block_store, _store_dir) = fixture.destructure();
+    let block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+    let ro_txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&ro_txn, &BTreeSet::from([80])).unwrap();
     let mut era_weights = EraWeights::default();
-    if let Ok(txn) = env.begin_ro_txn() {
-        let db = env.open_db(Some("block_header")).unwrap();
-        // Try to update the weights for the first switch block.
-        assert!(!era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[0].1.era_id.successor()
-            )
-            .unwrap());
-        assert_eq!(
-            era_weights.era_id(),
-            switch_block_headers[0].1.era_id.successor()
-        );
-        assert_eq!(
-            *era_weights.weights_mut().get(&KEYS[0]).unwrap(),
-            U512::from(100)
-        );
-        assert!(!era_weights.weights_mut().contains_key(&KEYS[1]));
 
-        // Try to update the weights for the second switch block.
-        assert!(!era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[1].1.era_id.successor()
-            )
-            .unwrap());
-        assert_eq!(
-            era_weights.era_id(),
-            switch_block_headers[1].1.era_id.successor()
-        );
-        assert_eq!(
-            *era_weights.weights_mut().get(&KEYS[1]).unwrap(),
-            U512::from(100)
-        );
-        assert!(!era_weights.weights_mut().contains_key(&KEYS[0]));
+    // Try to update the weights for the first switch block.
+    assert!(!era_weights
+        .refresh_weights_for_era(&ro_txn, &indices, switch_blocks[0].era_id().successor())
+        .unwrap());
+    assert_eq!(era_weights.era_id(), switch_blocks[0].era_id().successor());
+    assert_eq!(
+        *era_weights.weights_mut().get(&KEYS[0]).unwrap(),
+        U512::from(100)
+    );
+    assert!(!era_weights.weights_mut().contains_key(&KEYS[1]));
 
-        // Try to update the weights for the second switch block again.
-        assert!(!era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[1].1.era_id.successor()
-            )
-            .unwrap());
-        assert_eq!(
-            era_weights.era_id(),
-            switch_block_headers[1].1.era_id.successor()
-        );
-        assert_eq!(
-            *era_weights.weights_mut().get(&KEYS[1]).unwrap(),
-            U512::from(100)
-        );
-        assert!(!era_weights.weights_mut().contains_key(&KEYS[0]));
+    // Try to update the weights for the second switch block.
+    assert!(!era_weights
+        .refresh_weights_for_era(&ro_txn, &indices, switch_blocks[1].era_id().successor())
+        .unwrap());
+    assert_eq!(era_weights.era_id(), switch_blocks[1].era_id().successor());
+    assert_eq!(
+        *era_weights.weights_mut().get(&KEYS[1]).unwrap(),
+        U512::from(100)
+    );
+    assert!(!era_weights.weights_mut().contains_key(&KEYS[0]));
 
-        // Try to update the weights for a nonexistent switch block.
-        let expected_missing_era_id = switch_block_headers[1].1.era_id.successor().successor();
-        match era_weights.refresh_weights_for_era(&txn, db, &indices, expected_missing_era_id) {
-            Err(Error::MissingEraWeights(actual_missing_era_id)) => {
-                assert_eq!(expected_missing_era_id, actual_missing_era_id)
-            }
-            _ => panic!("Unexpected failure"),
+    // Try to update the weights for the second switch block again.
+    assert!(!era_weights
+        .refresh_weights_for_era(&ro_txn, &indices, switch_blocks[1].era_id().successor())
+        .unwrap());
+    assert_eq!(era_weights.era_id(), switch_blocks[1].era_id().successor());
+    assert_eq!(
+        *era_weights.weights_mut().get(&KEYS[1]).unwrap(),
+        U512::from(100)
+    );
+    assert!(!era_weights.weights_mut().contains_key(&KEYS[0]));
+
+    // Try to update the weights for a nonexistent switch block.
+    let expected_missing_era_id = switch_blocks[1].era_id().successor().successor();
+    match era_weights.refresh_weights_for_era(&ro_txn, &indices, expected_missing_era_id) {
+        Err(Error::MissingEraWeights(actual_missing_era_id)) => {
+            assert_eq!(expected_missing_era_id, actual_missing_era_id)
         }
-        txn.commit().unwrap();
-    };
-
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        // Delete the weights for the first switch block in the db.
-        switch_block_headers[0].1.era_end = None;
-        txn.put(
-            *fixture.db(Some("block_header")).unwrap(),
-            &switch_block_headers[0].0,
-            &bincode::serialize(&switch_block_headers[0].1).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
-    if let Ok(txn) = env.begin_ro_txn() {
-        let db = env.open_db(Some("block_header")).unwrap();
-        let expected_missing_era_id = switch_block_headers[0].1.era_id.successor();
-        // Make sure we get an error when the block has no weights.
-        match era_weights.refresh_weights_for_era(&txn, db, &indices, expected_missing_era_id) {
-            Err(Error::MissingEraWeights(actual_missing_era_id)) => {
-                assert_eq!(expected_missing_era_id, actual_missing_era_id)
-            }
-            _ => panic!("Unexpected failure"),
-        }
-        txn.commit().unwrap();
-    };
+        _ => panic!("Unexpected failure"),
+    }
+    ro_txn.commit().unwrap();
 }
 
 #[test]
 fn era_weights_with_upgrade() {
-    const SWITCH_BLOCK_COUNT: usize = 2;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
 
-    let fixture = LmdbTestFixture::new(vec!["block_header"], None);
-    // Create mock switch block headers.
-    let mut switch_block_headers: Vec<(BlockHash, MockSwitchBlockHeader)> = (0..SWITCH_BLOCK_COUNT
-        as u8)
-        .map(test_utils::mock_switch_block_header)
-        .collect();
-    // Set an era and height for the first one.
-    switch_block_headers[0].1.era_id = 10.into();
-    switch_block_headers[0].1.height = 80;
-    // Insert some weight for the next era weights.
-    switch_block_headers[0]
-        .1
-        .era_end
-        .as_mut()
-        .unwrap()
-        .next_era_validator_weights
-        .insert(KEYS[0].clone(), 100.into());
-    // Set an era and height for the second one.
-    switch_block_headers[1].1.era_id = 11.into();
-    switch_block_headers[1].1.height = 280;
-    // Insert some weight for the next era weights.
-    switch_block_headers[1]
-        .1
-        .era_end
-        .as_mut()
-        .unwrap()
-        .next_era_validator_weights
-        .insert(KEYS[1].clone(), 100.into());
-    // Upgrade the version of the second and third switch blocks.
-    switch_block_headers[1].1.protocol_version = ProtocolVersion::from_parts(1, 1, 0);
+    // Create mock switch blocks for each era and set an appropriate era and height for each one.
+    let mut switch_blocks: Vec<Block> = vec![];
 
-    let env = &fixture.env;
+    // Set an era, height and next era weights for the first one.
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        10,
+        80,
+        &[(KEYS[0].clone(), 100.into())],
+        None,
+    ));
+
+    // Set an era, height and next era weights for the second one.
+    // Upgrade the version of the second switch block.
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        11,
+        280,
+        &[(KEYS[1].clone(), 100.into())],
+        Some(ProtocolVersion::from_parts(1, 1, 0)),
+    ));
+
     // Insert the blocks into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for (block_hash, block_header) in switch_block_headers.iter().take(SWITCH_BLOCK_COUNT) {
-            // Store the switch block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
-    let indices = initialize_indices(env, &BTreeSet::from([80, 280])).unwrap();
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    for switch_block in switch_blocks.iter() {
+        let _ = rw_txn.write(switch_block).unwrap();
+    }
+    rw_txn.commit().unwrap();
+
+    let (block_store, _store_dir) = fixture.destructure();
+    let block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+    let txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&txn, &BTreeSet::from([80, 280])).unwrap();
     let mut era_weights = EraWeights::default();
-    if let Ok(txn) = env.begin_ro_txn() {
-        let db = env.open_db(Some("block_header")).unwrap();
 
-        assert!(era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[0].1.era_id.successor()
-            )
-            .unwrap());
+    assert!(era_weights
+        .refresh_weights_for_era(&txn, &indices, switch_blocks[0].era_id().successor())
+        .unwrap());
 
-        assert!(!era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[1].1.era_id.successor()
-            )
-            .unwrap());
+    assert!(!era_weights
+        .refresh_weights_for_era(&txn, &indices, switch_blocks[1].era_id().successor())
+        .unwrap());
 
-        assert!(era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[0].1.era_id.successor()
-            )
-            .unwrap());
+    assert!(era_weights
+        .refresh_weights_for_era(&txn, &indices, switch_blocks[0].era_id().successor())
+        .unwrap());
 
-        assert!(!era_weights
-            .refresh_weights_for_era(
-                &txn,
-                db,
-                &indices,
-                switch_block_headers[1].1.era_id.successor()
-            )
-            .unwrap());
+    assert!(!era_weights
+        .refresh_weights_for_era(&txn, &indices, switch_blocks[1].era_id().successor())
+        .unwrap());
 
-        txn.commit().unwrap();
-    };
+    txn.commit().unwrap();
 }
 
 #[test]
 fn purge_signatures_should_work() {
-    const BLOCK_COUNT: usize = 4;
-    const SWITCH_BLOCK_COUNT: usize = 2;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
 
-    let fixture = LmdbTestFixture::new(vec!["block_header", "block_metadata"], None);
-    // Create mock block headers.
-    let mut block_headers: Vec<(BlockHash, MockBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_block_header)
-        .collect();
-    // Set an era and height for each one.
-    block_headers[0].1.era_id = 10.into();
-    block_headers[0].1.height = 100;
-    block_headers[1].1.era_id = 10.into();
-    block_headers[1].1.height = 200;
-    block_headers[2].1.era_id = 20.into();
-    block_headers[2].1.height = 300;
-    block_headers[3].1.era_id = 20.into();
-    block_headers[3].1.height = 400;
+    // Create mock blocks and set an era and height for each one.
+    let mut blocks: Vec<Block> = vec![];
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(100)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(200)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(300)
+            .era(20)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(400)
+            .era(20)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+
     // Create mock block signatures.
-    let mut block_signatures: Vec<BlockSignatures> = block_headers
+    let mut block_signatures: Vec<BlockSignaturesV2> = blocks
         .iter()
-        .map(|(block_hash, header)| BlockSignatures::new(*block_hash, header.era_id))
+        .map(|block| {
+            BlockSignaturesV2::new(
+                *block.hash(),
+                block.height(),
+                block.era_id(),
+                ChainNameDigest::from_digest(Digest::random(&mut rng).into()),
+            )
+        })
         .collect();
-    // Create mock switch block headers.
-    let mut switch_block_headers: Vec<(BlockHash, MockSwitchBlockHeader)> = (0..SWITCH_BLOCK_COUNT
-        as u8)
-        .map(test_utils::mock_switch_block_header)
-        .collect();
-    // Set an appropriate era and height for switch block 1.
-    switch_block_headers[0].1.era_id = block_headers[0].1.era_id - 1;
-    switch_block_headers[0].1.height = 80;
+
+    // Create mock switch blocks for each era and set an appropriate era and height for each one.
     // Add weights for this switch block (500, 500).
-    switch_block_headers[0]
-        .1
-        .insert_key_weight(KEYS[0].clone(), 500.into());
-    switch_block_headers[0]
-        .1
-        .insert_key_weight(KEYS[1].clone(), 500.into());
+    let mut switch_blocks: Vec<Block> = vec![];
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        (blocks[0].era_id() - 1).value(),
+        80,
+        &[(KEYS[0].clone(), 500.into()), (KEYS[1].clone(), 500.into())],
+        None,
+    ));
+
+    // Add weights for this switch block (300, 300, 400).
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        (blocks[2].era_id() - 1).value(),
+        280,
+        &[
+            (KEYS[0].clone(), 300.into()),
+            (KEYS[1].clone(), 300.into()),
+            (KEYS[2].clone(), 400.into()),
+        ],
+        None,
+    ));
 
     // Add keys and signatures for block 1.
-    block_signatures[0]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-    block_signatures[0]
-        .proofs
-        .insert(KEYS[1].clone(), Signature::System);
+    block_signatures[0].insert_signature(KEYS[0].clone(), Signature::System);
+    block_signatures[0].insert_signature(KEYS[1].clone(), Signature::System);
     // Add keys and signatures for block 2.
-    block_signatures[1]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-
-    // Set an appropriate era and height for switch block 2.
-    switch_block_headers[1].1.era_id = block_headers[2].1.era_id - 1;
-    switch_block_headers[1].1.height = 280;
-    // Add weights for this switch block (300, 300, 400).
-    switch_block_headers[1]
-        .1
-        .insert_key_weight(KEYS[0].clone(), 300.into());
-    switch_block_headers[1]
-        .1
-        .insert_key_weight(KEYS[1].clone(), 300.into());
-    switch_block_headers[1]
-        .1
-        .insert_key_weight(KEYS[2].clone(), 400.into());
+    block_signatures[1].insert_signature(KEYS[0].clone(), Signature::System);
 
     // Add keys and signatures for block 3.
-    block_signatures[2]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-    block_signatures[2]
-        .proofs
-        .insert(KEYS[1].clone(), Signature::System);
-    block_signatures[2]
-        .proofs
-        .insert(KEYS[2].clone(), Signature::System);
+    block_signatures[2].insert_signature(KEYS[0].clone(), Signature::System);
+    block_signatures[2].insert_signature(KEYS[1].clone(), Signature::System);
+    block_signatures[2].insert_signature(KEYS[2].clone(), Signature::System);
     // Add keys and signatures for block 4.
-    block_signatures[3]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-    block_signatures[3]
-        .proofs
-        .insert(KEYS[2].clone(), Signature::System);
+    block_signatures[3].insert_signature(KEYS[0].clone(), Signature::System);
+    block_signatures[3].insert_signature(KEYS[2].clone(), Signature::System);
 
-    let env = &fixture.env;
     // Insert the blocks and signatures into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for i in 0..BLOCK_COUNT {
-            // Store the block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                &block_headers[i].0,
-                &bincode::serialize(&block_headers[i].1).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-            // Store the signatures.
-            txn.put(
-                *fixture.db(Some("block_metadata")).unwrap(),
-                &block_headers[i].0,
-                &bincode::serialize(&block_signatures[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        for (block_hash, block_header) in switch_block_headers.iter().take(SWITCH_BLOCK_COUNT) {
-            // Store the switch block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    for switch_block in switch_blocks.iter() {
+        let _ = rw_txn.write(switch_block).unwrap();
+    }
+    for (id, block) in blocks.iter().enumerate() {
+        let _ = rw_txn.write(block).unwrap();
+        let sigs: BlockSignatures = block_signatures[id].clone().into();
+        let _ = rw_txn.write(&sigs).unwrap();
+    }
+    rw_txn.commit().unwrap();
 
-    let indices = initialize_indices(env, &BTreeSet::from([100, 200, 300, 400])).unwrap();
+    let (block_store, _store_dir) = fixture.destructure();
+    let mut block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+    let txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&txn, &BTreeSet::from([100, 200, 300, 400])).unwrap();
+    txn.commit().unwrap();
 
     // Purge signatures for blocks 1, 2 and 3 to weak finality.
+    let mut txn = block_store.checkout_rw().unwrap();
+    assert!(purge_signatures_for_blocks(
+        &mut txn,
+        &indices,
+        BTreeSet::from([100, 200, 300]),
+        false
+    )
+    .is_ok());
+    txn.commit().unwrap();
+
+    let txn = block_store.checkout_ro().unwrap();
+    let block_1_sigs = get_sigs_from_db(&txn, blocks[0].hash());
+    // For block 1, any of the 2 signatures will be fine (500/1000), but
+    // not both.
     assert!(
-        purge_signatures_for_blocks(env, &indices, BTreeSet::from([100, 200, 300]), false).is_ok()
+        (block_1_sigs.proofs().contains_key(&KEYS[0])
+            && !block_1_sigs.proofs().contains_key(&KEYS[1]))
+            || (!block_1_sigs.proofs().contains_key(&KEYS[0])
+                && block_1_sigs.proofs().contains_key(&KEYS[1]))
     );
-    if let Ok(txn) = env.begin_ro_txn() {
-        let block_1_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[0].0);
-        // For block 1, any of the 2 signatures will be fine (500/1000), but
-        // not both.
-        assert!(
-            (block_1_sigs.proofs.contains_key(&KEYS[0])
-                && !block_1_sigs.proofs.contains_key(&KEYS[1]))
-                || (!block_1_sigs.proofs.contains_key(&KEYS[0])
-                    && block_1_sigs.proofs.contains_key(&KEYS[1]))
-        );
 
-        // Block 2 only had the first signature, which already meets the
-        // requirements (500/1000).
-        let block_2_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[1].0);
-        assert!(block_2_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(!block_2_sigs.proofs.contains_key(&KEYS[1]));
+    // Block 2 only had the first signature, which already meets the
+    // requirements (500/1000).
+    let block_2_sigs = get_sigs_from_db(&txn, blocks[1].hash());
+    assert!(block_2_sigs.proofs().contains_key(&KEYS[0]));
+    assert!(!block_2_sigs.proofs().contains_key(&KEYS[1]));
 
-        // Block 3 had all the keys (300, 300, 400), so it should have kept
-        // the first 2.
-        let block_3_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[2].0);
-        assert!(block_3_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(block_3_sigs.proofs.contains_key(&KEYS[1]));
-        assert!(!block_3_sigs.proofs.contains_key(&KEYS[2]));
+    // Block 3 had all the keys (300, 300, 400), so it should have kept
+    // the first 2.
+    let block_3_sigs = get_sigs_from_db(&txn, blocks[2].hash());
+    assert!(block_3_sigs.proofs().contains_key(&KEYS[0]));
+    assert!(block_3_sigs.proofs().contains_key(&KEYS[1]));
+    assert!(!block_3_sigs.proofs().contains_key(&KEYS[2]));
 
-        // Block 4 had signatures for keys 1 (300) and 3 (400), but it was not
-        // included in the purge list, so it should have kept both.
-        let block_4_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[3].0);
-        assert!(block_4_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(!block_4_sigs.proofs.contains_key(&KEYS[1]));
-        assert!(block_4_sigs.proofs.contains_key(&KEYS[2]));
-        txn.commit().unwrap();
-    };
+    // Block 4 had signatures for keys 1 (300) and 3 (400), but it was not
+    // included in the purge list, so it should have kept both.
+    let block_4_sigs = get_sigs_from_db(&txn, blocks[3].hash());
+    assert!(block_4_sigs.proofs().contains_key(&KEYS[0]));
+    assert!(!block_4_sigs.proofs().contains_key(&KEYS[1]));
+    assert!(block_4_sigs.proofs().contains_key(&KEYS[2]));
+    txn.commit().unwrap();
 
     // Purge signatures for blocks 1 and 4 to no finality.
-    assert!(purge_signatures_for_blocks(env, &indices, BTreeSet::from([100, 400]), true).is_ok());
-    if let Ok(txn) = env.begin_ro_txn() {
-        // We should have no record for the signatures of block 1.
-        match txn.get(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[0].0,
-        ) {
-            Err(LmdbError::NotFound) => {}
-            other => panic!("Unexpected search result: {other:?}"),
-        }
+    let mut txn = block_store.checkout_rw().unwrap();
+    assert!(
+        purge_signatures_for_blocks(&mut txn, &indices, BTreeSet::from([100, 400]), true).is_ok()
+    );
+    txn.commit().unwrap();
 
-        // Block 2 should be the same as before.
-        let block_2_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[1].0);
-        assert!(block_2_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(!block_2_sigs.proofs.contains_key(&KEYS[1]));
+    let txn = block_store.checkout_ro().unwrap();
+    // We should have no record for the signatures of block 1.
+    let maybe_block_sigs: Option<BlockSignatures> = txn.read(*blocks[0].hash()).unwrap();
+    assert!(maybe_block_sigs.is_none());
 
-        // Block 3 should be the same as before.
-        let block_3_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[2].0);
-        assert!(block_3_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(block_3_sigs.proofs.contains_key(&KEYS[1]));
-        assert!(!block_3_sigs.proofs.contains_key(&KEYS[2]));
+    // Block 2 should be the same as before.
+    let block_2_sigs = get_sigs_from_db(&txn, blocks[1].hash());
+    assert!(block_2_sigs.proofs().contains_key(&KEYS[0]));
+    assert!(!block_2_sigs.proofs().contains_key(&KEYS[1]));
 
-        // We should have no record for the signatures of block 4.
-        match txn.get(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[3].0,
-        ) {
-            Err(LmdbError::NotFound) => {}
-            other => panic!("Unexpected search result: {other:?}"),
-        }
-        txn.commit().unwrap();
-    };
+    // Block 3 should be the same as before.
+    let block_3_sigs = get_sigs_from_db(&txn, blocks[2].hash());
+    assert!(block_3_sigs.proofs().contains_key(&KEYS[0]));
+    assert!(block_3_sigs.proofs().contains_key(&KEYS[1]));
+    assert!(!block_3_sigs.proofs().contains_key(&KEYS[2]));
+
+    // We should have no record for the signatures of block 4.
+    let maybe_block_sigs: Option<BlockSignatures> = txn.read(*blocks[3].hash()).unwrap();
+    assert!(maybe_block_sigs.is_none());
+    txn.commit().unwrap();
 }
 
 #[test]
 fn purge_signatures_bad_input() {
-    const BLOCK_COUNT: usize = 2;
-    const SWITCH_BLOCK_COUNT: usize = 2;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
 
-    let fixture = LmdbTestFixture::new(vec!["block_header", "block_metadata"], None);
-    // Create mock block headers.
-    let mut block_headers: Vec<(BlockHash, MockBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_block_header)
-        .collect();
+    // Create mock blocks and set an era and height for each one.
+    let mut blocks: Vec<Block> = vec![];
     // Set an era and height for block 1.
-    block_headers[0].1.era_id = 10.into();
-    block_headers[0].1.height = 100;
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(100)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
     // Set an era and height for block 2.
-    block_headers[1].1.era_id = 20.into();
-    block_headers[1].1.height = 200;
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(200)
+            .era(20)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+
     // Create mock block signatures.
-    let mut block_signatures: Vec<BlockSignatures> = block_headers
+    let mut block_signatures: Vec<BlockSignaturesV2> = blocks
         .iter()
-        .map(|(block_hash, header)| BlockSignatures::new(*block_hash, header.era_id))
+        .map(|block| {
+            BlockSignaturesV2::new(
+                *block.hash(),
+                block.height(),
+                block.era_id(),
+                ChainNameDigest::from_digest(Digest::random(&mut rng).into()),
+            )
+        })
         .collect();
-    // Create mock switch block headers.
-    let mut switch_block_headers: Vec<(BlockHash, MockSwitchBlockHeader)> = (0..SWITCH_BLOCK_COUNT
-        as u8)
-        .map(test_utils::mock_switch_block_header)
-        .collect();
-    // Set an appropriate era and height for switch block 1.
-    switch_block_headers[0].1.era_id = block_headers[0].1.era_id - 1;
-    switch_block_headers[0].1.height = 80;
+
+    // Create mock switch blocks for each era and set an appropriate era and height for each one.
+    let mut switch_blocks: Vec<Block> = vec![];
     // Add weights for this switch block (700, 300).
-    switch_block_headers[0]
-        .1
-        .insert_key_weight(KEYS[0].clone(), 700.into());
-    switch_block_headers[0]
-        .1
-        .insert_key_weight(KEYS[1].clone(), 300.into());
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        (blocks[0].era_id() - 1).value(),
+        80,
+        &[(KEYS[0].clone(), 700.into()), (KEYS[1].clone(), 300.into())],
+        None,
+    ));
+    // Add weights for this switch block (400, 600).
+    switch_blocks.push(new_switch_block_with_weights(
+        &mut rng,
+        (blocks[1].era_id() - 1).value(),
+        180,
+        &[(KEYS[0].clone(), 400.into()), (KEYS[1].clone(), 600.into())],
+        None,
+    ));
 
     // Add keys and signatures for block 1.
-    block_signatures[0]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-    block_signatures[0]
-        .proofs
-        .insert(KEYS[1].clone(), Signature::System);
-
-    // Set an appropriate era and height for switch block 2.
-    switch_block_headers[1].1.era_id = block_headers[1].1.era_id - 1;
-    switch_block_headers[1].1.height = 180;
-    // Add weights for this switch block (400, 600).
-    switch_block_headers[1]
-        .1
-        .insert_key_weight(KEYS[0].clone(), 400.into());
-    switch_block_headers[1]
-        .1
-        .insert_key_weight(KEYS[1].clone(), 600.into());
+    block_signatures[0].insert_signature(KEYS[0].clone(), Signature::System);
+    block_signatures[0].insert_signature(KEYS[1].clone(), Signature::System);
 
     // Add keys and signatures for block 2.
-    block_signatures[1]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-    block_signatures[1]
-        .proofs
-        .insert(KEYS[1].clone(), Signature::System);
+    block_signatures[1].insert_signature(KEYS[0].clone(), Signature::System);
+    block_signatures[1].insert_signature(KEYS[1].clone(), Signature::System);
 
-    let env = &fixture.env;
     // Insert the blocks and signatures into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for i in 0..BLOCK_COUNT {
-            // Store the block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                &block_headers[i].0,
-                &bincode::serialize(&block_headers[i].1).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-            // Store the signatures.
-            txn.put(
-                *fixture.db(Some("block_metadata")).unwrap(),
-                &block_headers[i].0,
-                &bincode::serialize(&block_signatures[i]).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        for (block_hash, block_header) in switch_block_headers.iter().take(SWITCH_BLOCK_COUNT) {
-            // Store the switch block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        txn.commit().unwrap();
-    };
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    for switch_block in switch_blocks.iter() {
+        let _ = rw_txn.write(switch_block).unwrap();
+    }
+    for (id, block) in blocks.iter().enumerate() {
+        let _ = rw_txn.write(block).unwrap();
+        let sigs: BlockSignatures = block_signatures[id].clone().into();
+        let _ = rw_txn.write(&sigs).unwrap();
+    }
+    rw_txn.commit().unwrap();
 
-    let indices = initialize_indices(env, &BTreeSet::from([100])).unwrap();
+    let (block_store, _store_dir) = fixture.destructure();
+    let mut block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+    let txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&txn, &BTreeSet::from([100])).unwrap();
+    txn.commit().unwrap();
+
     // Purge signatures for blocks 1 and 2 to weak finality.
-    assert!(purge_signatures_for_blocks(env, &indices, BTreeSet::from([100, 200]), false).is_ok());
-    if let Ok(txn) = env.begin_ro_txn() {
-        let block_1_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[0].0);
+    let mut txn = block_store.checkout_rw().unwrap();
+    assert!(
+        purge_signatures_for_blocks(&mut txn, &indices, BTreeSet::from([100, 200]), false).is_ok()
+    );
+    txn.commit().unwrap();
+
+    if let Ok(txn) = block_store.checkout_ro() {
+        let block_1_sigs = get_sigs_from_db(&txn, blocks[0].hash());
         // Block 1 has a super-majority signature (700), so the purge would
         // have failed and the signatures are untouched.
-        assert!(block_1_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(block_1_sigs.proofs.contains_key(&KEYS[1]));
+        assert!(block_1_sigs.proofs().contains_key(&KEYS[0]));
+        assert!(block_1_sigs.proofs().contains_key(&KEYS[1]));
 
-        let block_2_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[1].0);
+        let block_2_sigs = get_sigs_from_db(&txn, blocks[1].hash());
         // Block 2 wasn't in the purge list, so it should be untouched.
-        assert!(block_2_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(block_2_sigs.proofs.contains_key(&KEYS[1]));
+        assert!(block_2_sigs.proofs().contains_key(&KEYS[0]));
+        assert!(block_2_sigs.proofs().contains_key(&KEYS[1]));
         txn.commit().unwrap();
-    };
-
-    // Overwrite the signatures for block 2 with bogus data.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        // Store the signatures.
-        txn.put(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[1].0,
-            &bincode::serialize(&[0u8, 1u8, 2u8]).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
-
-    let indices = initialize_indices(env, &BTreeSet::from([100, 200])).unwrap();
-    // Purge should fail with a deserialization error.
-    match purge_signatures_for_blocks(env, &indices, BTreeSet::from([100, 200]), false) {
-        Err(Error::SignaturesParsing(block_hash, _)) if block_hash == block_headers[1].0 => {}
-        other => panic!("Unexpected result: {other:?}"),
     };
 }
 
 #[test]
 fn purge_signatures_missing_from_db() {
-    const BLOCK_COUNT: usize = 2;
+    let mut rng = TestRng::new();
+    let mut fixture = LmdbTestFixture::new();
 
-    let fixture = LmdbTestFixture::new(vec!["block_header", "block_metadata"], None);
-    // Create mock block headers.
-    let mut block_headers: Vec<(BlockHash, MockBlockHeader)> = (0..BLOCK_COUNT as u8)
-        .map(test_utils::mock_block_header)
-        .collect();
-    // Set an era and height for each one.
-    block_headers[0].1.era_id = 10.into();
-    block_headers[0].1.height = 100;
-    block_headers[1].1.era_id = 10.into();
-    block_headers[1].1.height = 200;
+    // Create mock blocks and set an era and height for each one.
+    let mut blocks: Vec<Block> = vec![];
+    // Set an era and height for block 1.
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(100)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+    // Set an era and height for block 2.
+    blocks.push(
+        TestBlockBuilder::new()
+            .height(200)
+            .era(10)
+            .switch_block(false)
+            .build(&mut rng)
+            .into(),
+    );
+
     // Create mock block signatures.
-    let mut block_signatures: Vec<BlockSignatures> = block_headers
+    let mut block_signatures: Vec<BlockSignaturesV2> = blocks
         .iter()
-        .map(|(block_hash, header)| BlockSignatures::new(*block_hash, header.era_id))
+        .map(|block| {
+            BlockSignaturesV2::new(
+                *block.hash(),
+                block.height(),
+                block.era_id(),
+                ChainNameDigest::from_digest(Digest::random(&mut rng).into()),
+            )
+        })
         .collect();
-    // Create mock switch block headers.
-    let (switch_block_hash, mut switch_block_header) = test_utils::mock_switch_block_header(0);
-    // Set an appropriate era and height for switch block 1.
-    switch_block_header.era_id = block_headers[0].1.era_id - 1;
-    switch_block_header.height = 80;
+
     // Add weights for this switch block (400, 600).
-    switch_block_header.insert_key_weight(KEYS[0].clone(), 400.into());
-    switch_block_header.insert_key_weight(KEYS[1].clone(), 600.into());
+    let switch_block = new_switch_block_with_weights(
+        &mut rng,
+        (blocks[0].era_id() - 1).value(),
+        80,
+        &[(KEYS[0].clone(), 400.into()), (KEYS[1].clone(), 600.into())],
+        None,
+    );
 
     // Add keys and signatures for block 1 but skip block 2.
-    block_signatures[0]
-        .proofs
-        .insert(KEYS[0].clone(), Signature::System);
-    block_signatures[0]
-        .proofs
-        .insert(KEYS[1].clone(), Signature::System);
+    block_signatures[0].insert_signature(KEYS[0].clone(), Signature::System);
+    block_signatures[0].insert_signature(KEYS[1].clone(), Signature::System);
 
-    let env = &fixture.env;
     // Insert the blocks and signatures into the database.
-    if let Ok(mut txn) = env.begin_rw_txn() {
-        for (block_hash, block_header) in block_headers.iter().take(BLOCK_COUNT) {
-            // Store the block header.
-            txn.put(
-                *fixture.db(Some("block_header")).unwrap(),
-                block_hash,
-                &bincode::serialize(block_header).unwrap(),
-                WriteFlags::empty(),
-            )
-            .unwrap();
-        }
-        // Store the signatures for block 1.
-        txn.put(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[0].0,
-            &bincode::serialize(&block_signatures[0]).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        // Store the switch block header.
-        txn.put(
-            *fixture.db(Some("block_header")).unwrap(),
-            &switch_block_hash,
-            &bincode::serialize(&switch_block_header).unwrap(),
-            WriteFlags::empty(),
-        )
-        .unwrap();
-        txn.commit().unwrap();
-    };
+    let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+    let _ = rw_txn.write(&switch_block).unwrap();
 
-    let indices = initialize_indices(env, &BTreeSet::from([100, 200])).unwrap();
+    for block in blocks.iter() {
+        let _ = rw_txn.write(block).unwrap();
+    }
+
+    // Only store signatures for block 1.
+    let sigs: BlockSignatures = block_signatures[0].clone().into();
+    let _ = rw_txn.write(&sigs).unwrap();
+    rw_txn.commit().unwrap();
+
+    let (block_store, _store_dir) = fixture.destructure();
+    let mut block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::default()).unwrap();
+    let txn = block_store.checkout_ro().unwrap();
+    let indices = initialize_indices(&txn, &BTreeSet::from([100, 200])).unwrap();
+    txn.commit().unwrap();
 
     // Purge signatures for blocks 1 and 2 to weak finality. The operation
     // should succeed even if the signatures for block 2 are missing.
-    assert!(purge_signatures_for_blocks(env, &indices, BTreeSet::from([100, 200]), false).is_ok());
-    if let Ok(txn) = env.begin_ro_txn() {
-        let block_1_sigs = get_sigs_from_db(&txn, &fixture, &block_headers[0].0);
+    let mut txn = block_store.checkout_rw().unwrap();
+    assert!(
+        purge_signatures_for_blocks(&mut txn, &indices, BTreeSet::from([100, 200]), false).is_ok()
+    );
+    txn.commit().unwrap();
+
+    if let Ok(txn) = block_store.checkout_ro() {
+        let block_1_sigs = get_sigs_from_db(&txn, blocks[0].hash());
         // Block 1 had both keys (400, 600), so it should have kept
         // the first one.
-        assert!(block_1_sigs.proofs.contains_key(&KEYS[0]));
-        assert!(!block_1_sigs.proofs.contains_key(&KEYS[1]));
+        assert!(block_1_sigs.proofs().contains_key(&KEYS[0]));
+        assert!(!block_1_sigs.proofs().contains_key(&KEYS[1]));
 
         // We should have no record for the signatures of block 2.
-        match txn.get(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[1].0,
-        ) {
-            Err(LmdbError::NotFound) => {}
-            other => panic!("Unexpected search result: {other:?}"),
-        }
+        let maybe_block_sigs: Option<BlockSignatures> = txn.read(*blocks[1].hash()).unwrap();
+        assert!(maybe_block_sigs.is_none());
+
         txn.commit().unwrap();
     };
 
     // Purge signatures for blocks 1 and 2 to no finality. The operation
     // should succeed even if the signatures for block 2 are missing.
-    assert!(purge_signatures_for_blocks(env, &indices, BTreeSet::from([100, 200]), true).is_ok());
-    if let Ok(txn) = env.begin_ro_txn() {
+    let mut txn = block_store.checkout_rw().unwrap();
+    assert!(
+        purge_signatures_for_blocks(&mut txn, &indices, BTreeSet::from([100, 200]), true).is_ok()
+    );
+    txn.commit().unwrap();
+
+    if let Ok(txn) = block_store.checkout_ro() {
         // We should have no record for the signatures of block 1.
-        match txn.get(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[0].0,
-        ) {
-            Err(LmdbError::NotFound) => {}
-            other => panic!("Unexpected search result: {other:?}"),
-        }
+        let maybe_block_sigs: Option<BlockSignatures> = txn.read(*blocks[0].hash()).unwrap();
+        assert!(maybe_block_sigs.is_none());
 
         // We should have no record for the signatures of block 2.
-        match txn.get(
-            *fixture.db(Some("block_metadata")).unwrap(),
-            &block_headers[1].0,
-        ) {
-            Err(LmdbError::NotFound) => {}
-            other => panic!("Unexpected search result: {other:?}"),
-        }
+        let maybe_block_sigs: Option<BlockSignatures> = txn.read(*blocks[1].hash()).unwrap();
+        assert!(maybe_block_sigs.is_none());
         txn.commit().unwrap();
     };
 }
