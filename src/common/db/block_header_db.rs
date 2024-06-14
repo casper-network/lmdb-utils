@@ -3,25 +3,25 @@ use std::{
     result::Result,
 };
 
-use casper_node::types::BlockHeader;
+use casper_types::BlockHeaderV1;
 
 use super::{Database, DeserializationError};
 
-pub struct BlockHeaderDatabase;
+pub struct LegacyBlockHeaderDatabase;
 
-impl Display for BlockHeaderDatabase {
+impl Display for LegacyBlockHeaderDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
         write!(f, "block_header")
     }
 }
 
-impl Database for BlockHeaderDatabase {
+impl Database for LegacyBlockHeaderDatabase {
     fn db_name() -> &'static str {
         "block_header"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: BlockHeader = bincode::deserialize(bytes)?;
+        let _: BlockHeaderV1 = bincode::deserialize(bytes)?;
         Ok(())
     }
 }

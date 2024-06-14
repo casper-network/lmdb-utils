@@ -1,4 +1,3 @@
-pub(crate) mod block_body;
 mod read_db;
 mod summary;
 #[cfg(test)]
@@ -7,9 +6,8 @@ mod tests;
 use std::{io::Error as IoError, path::Path};
 
 use bincode::Error as BincodeError;
-use casper_node::types::BlockHash;
+use casper_storage::block_store::BlockStoreError;
 use clap::{Arg, ArgMatches, Command};
-use lmdb::Error as LmdbError;
 use serde_json::Error as JsonSerializationError;
 use thiserror::Error as ThisError;
 
@@ -22,19 +20,16 @@ const OUTPUT: &str = "output";
 #[derive(Debug, ThisError)]
 pub enum Error {
     /// Database operation error.
-    #[error("Error operating the database: {0}")]
-    Database(#[from] LmdbError),
-    #[error("Error deserializing raw key of block header DB element: {0}")]
-    InvalidKey(usize),
     #[error("Error serializing output: {0}")]
     JsonSerialize(#[from] JsonSerializationError),
     #[error("Error writing output: {0}")]
     Output(#[from] IoError),
-    /// Parsing error on entry at index in the database.
-    #[error("Error parsing element for block hash {0} in {1} DB: {2}")]
-    Parsing(BlockHash, String, BincodeError),
     #[error("Error serializing execution results: {0}")]
     Serialize(#[from] BincodeError),
+    #[error("Block store error: {0}")]
+    BlockStore(#[from] BlockStoreError),
+    #[error("Empty database.")]
+    EmptyDatabase,
 }
 
 enum DisplayOrder {

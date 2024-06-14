@@ -3,25 +3,25 @@ use std::{
     result::Result,
 };
 
-use casper_types::{bytesrepr::FromBytes, DeployHash};
+use casper_types::{bytesrepr::FromBytes, BlockBody};
 
 use super::{Database, DeserializationError};
 
-pub struct TransferHashesDatabase;
+pub struct VersionedBlockBodyDatabase;
 
-impl Display for TransferHashesDatabase {
+impl Display for VersionedBlockBodyDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
-        write!(f, "transfer_hashes")
+        write!(f, "block_body_v2")
     }
 }
 
-impl Database for TransferHashesDatabase {
+impl Database for VersionedBlockBodyDatabase {
     fn db_name() -> &'static str {
-        "transfer_hashes"
+        "block_body_v2"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: Vec<DeployHash> = FromBytes::from_bytes(bytes)?.0;
+        let _: BlockBody = FromBytes::from_bytes(bytes)?.0;
         Ok(())
     }
 }

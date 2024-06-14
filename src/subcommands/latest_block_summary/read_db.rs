@@ -5,17 +5,20 @@ use std::{
     result::Result,
 };
 
-use casper_hashing::Digest;
-use lmdb::{Cursor, Environment, Transaction};
-use log::{info, warn};
+use casper_storage::block_store::{
+    lmdb::{IndexedLmdbBlockStore, LmdbBlockStore},
+    types::Tip,
+    BlockStoreProvider, DataReader,
+};
+use casper_types::ProtocolVersion;
+use log::warn;
 use serde_json::{self, Error as SerializationError};
 
-use casper_node::types::{BlockHash, BlockHeader};
+use casper_types::BlockHeader;
 
-use crate::common::{
-    db::{self, BlockHeaderDatabase, Database, STORAGE_FILE_NAME},
-    lmdb_utils,
-    progress::ProgressTracker,
+use crate::common::db::{
+    DEFAULT_MAX_BLOCK_STORE_SIZE, DEFAULT_MAX_DEPLOY_METADATA_STORE_SIZE,
+    DEFAULT_MAX_DEPLOY_STORE_SIZE,
 };
 
 use super::{
@@ -23,74 +26,19 @@ use super::{
     Error,
 };
 
-fn get_highest_block(
-    env: &Environment,
-    log_progress: bool,
-) -> Result<(BlockHash, BlockHeader), Error> {
-    let txn = env.begin_ro_txn()?;
-    let db = unsafe { txn.open_db(Some(BlockHeaderDatabase::db_name()))? };
+fn get_highest_block<P: AsRef<Path>>(db_path: P) -> Result<BlockHeader, Error> {
+    let block_store = LmdbBlockStore::new(
+        db_path.as_ref(),
+        DEFAULT_MAX_BLOCK_STORE_SIZE
+            + DEFAULT_MAX_DEPLOY_STORE_SIZE
+            + DEFAULT_MAX_DEPLOY_METADATA_STORE_SIZE,
+    )?;
 
-    let mut max_height = 0u64;
-    let mut max_height_key = None;
+    let indexed_block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::from_parts(0, 0, 0))?;
+    let ro_txn = indexed_block_store.checkout_ro()?;
 
-    let maybe_entry_count = lmdb_utils::entry_count(&txn, db).ok();
-    let mut maybe_progress_tracker = None;
-
-    if let Ok(mut cursor) = txn.open_ro_cursor(db) {
-        if log_progress {
-            match maybe_entry_count {
-                Some(entry_count) => {
-                    match ProgressTracker::new(
-                        entry_count,
-                        Box::new(|completion| {
-                            info!("Database parsing {}% complete...", completion)
-                        }),
-                    ) {
-                        Ok(progress_tracker) => maybe_progress_tracker = Some(progress_tracker),
-                        Err(progress_tracker_error) => warn!(
-                            "Couldn't initialize progress tracker: {}",
-                            progress_tracker_error
-                        ),
-                    }
-                }
-                None => warn!("Unable to count db entries, progress will not be logged."),
-            }
-        }
-
-        for (idx, (raw_key, raw_val)) in cursor.iter().enumerate() {
-            let header: BlockHeader = bincode::deserialize(raw_val)
-                .map_err(|bincode_err| Error::Parsing(idx, bincode_err))?;
-            if header.height() >= max_height {
-                max_height = header.height();
-                let _ = max_height_key.replace(raw_key);
-            }
-
-            if let Some(progress_tracker) = maybe_progress_tracker.as_mut() {
-                progress_tracker.advance_by(1);
-            }
-        }
-    }
-
-    let max_height_key = max_height_key.ok_or(Error::EmptyDatabase)?;
-    let raw_bytes = txn.get(db, &max_height_key)?;
-    let highest_block_header: BlockHeader =
-        bincode::deserialize(raw_bytes).map_err(|bincode_err| {
-            Error::Parsing(
-                max_height
-                    .try_into()
-                    .expect("block height doesn't fit in usize"),
-                bincode_err,
-            )
-        })?;
-
-    let block_hash = Digest::try_from(max_height_key)
-        .map_err(|err| Error::InvalidBlockHash {
-            err,
-            val: String::from_utf8_lossy(max_height_key).to_string(),
-        })?
-        .into();
-
-    Ok((block_hash, highest_block_header))
+    DataReader::<Tip, BlockHeader>::read(&ro_txn, Tip)?.ok_or(Error::EmptyDatabase)
 }
 
 pub(crate) fn dump_block_info<W: Write + ?Sized>(
@@ -105,9 +53,6 @@ pub fn latest_block_summary<P1: AsRef<Path>, P2: AsRef<Path>>(
     output: Option<P2>,
     overwrite: bool,
 ) -> Result<(), Error> {
-    let storage_path = db_path.as_ref().join(STORAGE_FILE_NAME);
-    let env = db::db_env(storage_path)?;
-    let mut log_progress = false;
     // Validate the output file early so that, in case this fails
     // we don't unnecessarily read the whole database.
     let out_writer: Box<dyn Write> = if let Some(out_path) = output {
@@ -115,12 +60,11 @@ pub fn latest_block_summary<P1: AsRef<Path>, P2: AsRef<Path>>(
             .create_new(!overwrite)
             .write(true)
             .open(out_path)?;
-        log_progress = true;
         Box::new(file)
     } else {
         Box::new(io::stdout())
     };
-    let network_name = match parse_network_name(db_path) {
+    let network_name = match parse_network_name(&db_path) {
         Ok(name) => Some(name),
         Err(io_err) => {
             warn!("Couldn't derive network name from path: {}", io_err);
@@ -128,8 +72,8 @@ pub fn latest_block_summary<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     };
 
-    let (block_hash, highest_block) = get_highest_block(&env, log_progress)?;
-    let block_info = BlockInfo::new(network_name, block_hash, highest_block);
+    let highest_block_header = get_highest_block(db_path)?;
+    let block_info = BlockInfo::new(network_name, highest_block_header);
     dump_block_info(&block_info, out_writer)?;
 
     Ok(())

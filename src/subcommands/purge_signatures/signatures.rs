@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use casper_types::{PublicKey, U512};
-
-use super::block_signatures::BlockSignatures;
+use casper_types::{BlockSignatures, PublicKey, U512};
 
 // Returns whether the cumulative `weight` exceeds the weak finality threshold
 // for a `total` weight.
@@ -44,7 +42,7 @@ pub(super) fn strip_signatures(
         .iter()
         .flat_map(|(weight, keys)| keys.iter().map(move |key| (weight, *key)))
     {
-        if signatures.proofs.contains_key(key) {
+        if signatures.proofs().contains_key(key) {
             accumulated_weight += *weight;
             accumulated_sigs.insert(key);
 
@@ -75,9 +73,18 @@ pub(super) fn strip_signatures(
         return false;
     }
     // Keep only the accumulated signatures.
-    signatures
-        .proofs
-        .retain(|key, _| accumulated_sigs.contains(key));
+    let signatures_to_remove: Vec<PublicKey> = signatures
+        .proofs()
+        .keys()
+        .filter(|key| !accumulated_sigs.contains(*key))
+        .cloned()
+        .collect();
+
+    for key in signatures_to_remove {
+        if signatures.remove_signature(&key).is_none() {
+            return false;
+        }
+    }
     true
 }
 
@@ -85,12 +92,14 @@ pub(super) fn strip_signatures(
 mod tests {
     use std::collections::BTreeMap;
 
-    use casper_types::{PublicKey, Signature, U512};
+    use casper_types::{
+        testing::TestRng, BlockHash, BlockSignatures, BlockSignaturesV2, ChainNameDigest,
+        PublicKey, Signature, U512,
+    };
 
     use crate::{
-        subcommands::purge_signatures::{
-            block_signatures::BlockSignatures,
-            signatures::{is_strict_finality, is_weak_finality, strip_signatures},
+        subcommands::purge_signatures::signatures::{
+            is_strict_finality, is_weak_finality, strip_signatures,
         },
         test_utils::KEYS,
     };
@@ -123,20 +132,20 @@ mod tests {
 
     #[test]
     fn strip_signatures_progressive() {
-        let mut block_signatures = BlockSignatures::default();
+        let mut rng = TestRng::new();
+
+        let mut block_signatures: BlockSignatures = BlockSignaturesV2::new(
+            BlockHash::random(&mut rng),
+            100,
+            10.into(),
+            ChainNameDigest::from_chain_name("test"),
+        )
+        .into();
         // Create signatures for keys [1..4].
-        block_signatures
-            .proofs
-            .insert(KEYS[0].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[1].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[2].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[3].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[0].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[1].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[2].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[3].clone(), Signature::System);
 
         let mut weights: BTreeMap<PublicKey, U512> = BTreeMap::default();
         // Add weights for keys [1..4].
@@ -148,22 +157,27 @@ mod tests {
         assert!(strip_signatures(&mut block_signatures, &weights));
         // Signatures from keys [1..3] have a cumulative weight of 600/1000,
         // so signature from key 4 should have been purged.
-        assert!(block_signatures.proofs.contains_key(&KEYS[0]));
-        assert!(block_signatures.proofs.contains_key(&KEYS[1]));
-        assert!(block_signatures.proofs.contains_key(&KEYS[2]));
-        assert!(!block_signatures.proofs.contains_key(&KEYS[3]));
+        assert!(block_signatures.proofs().contains_key(&KEYS[0]));
+        assert!(block_signatures.proofs().contains_key(&KEYS[1]));
+        assert!(block_signatures.proofs().contains_key(&KEYS[2]));
+        assert!(!block_signatures.proofs().contains_key(&KEYS[3]));
     }
 
     #[test]
     fn strip_signatures_equal_weights() {
-        let mut block_signatures = BlockSignatures::default();
+        let mut rng = TestRng::new();
+
+        let mut block_signatures: BlockSignatures = BlockSignaturesV2::new(
+            BlockHash::random(&mut rng),
+            100,
+            10.into(),
+            ChainNameDigest::from_chain_name("test"),
+        )
+        .into();
+
         // Create signatures for keys [1..2].
-        block_signatures
-            .proofs
-            .insert(KEYS[0].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[1].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[0].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[1].clone(), Signature::System);
 
         let mut weights: BTreeMap<PublicKey, U512> = BTreeMap::default();
         // Add weights for keys [1..2].
@@ -173,25 +187,26 @@ mod tests {
         assert!(strip_signatures(&mut block_signatures, &weights));
         // Any of the signatures has half the weight, so only one should have
         // been kept.
-        assert_eq!(block_signatures.proofs.len(), 1);
+        assert_eq!(block_signatures.proofs().len(), 1);
     }
 
     #[test]
     fn strip_signatures_one_small_three_large() {
-        let mut block_signatures = BlockSignatures::default();
+        let mut rng = TestRng::new();
+
+        let mut block_signatures: BlockSignatures = BlockSignaturesV2::new(
+            BlockHash::random(&mut rng),
+            100,
+            10.into(),
+            ChainNameDigest::from_chain_name("test"),
+        )
+        .into();
+
         // Create signatures for keys [1..4].
-        block_signatures
-            .proofs
-            .insert(KEYS[0].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[1].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[2].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[3].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[0].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[1].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[2].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[3].clone(), Signature::System);
 
         let mut weights: BTreeMap<PublicKey, U512> = BTreeMap::default();
         // Add weights for keys [1..4].
@@ -204,23 +219,25 @@ mod tests {
         // Any of the signatures [2..4] has a third of the weight, so one of
         // them plus the first signature with a weight of 1 make weak but not
         // strict finality.
-        assert!(block_signatures.proofs.contains_key(&KEYS[0]));
-        assert_eq!(block_signatures.proofs.len(), 2);
+        assert!(block_signatures.proofs().contains_key(&KEYS[0]));
+        assert_eq!(block_signatures.proofs().len(), 2);
     }
 
     #[test]
     fn strip_signatures_split_weights() {
-        let mut block_signatures = BlockSignatures::default();
+        let mut rng = TestRng::new();
+        let mut block_signatures: BlockSignatures = BlockSignaturesV2::new(
+            BlockHash::random(&mut rng),
+            100,
+            10.into(),
+            ChainNameDigest::from_chain_name("test"),
+        )
+        .into();
+
         // Create signatures for keys [1..3].
-        block_signatures
-            .proofs
-            .insert(KEYS[0].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[1].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[2].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[0].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[1].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[2].clone(), Signature::System);
 
         let mut weights: BTreeMap<PublicKey, U512> = BTreeMap::default();
         // Add weights for keys [1..3].
@@ -231,22 +248,24 @@ mod tests {
         assert!(strip_signatures(&mut block_signatures, &weights));
         // Any 2 signatures have a cumulative weight of 666/999, or 2/3 of the
         // weight, so 1 of the 3 signatures should have been purged.
-        assert_eq!(block_signatures.proofs.len(), 2);
+        assert_eq!(block_signatures.proofs().len(), 2);
     }
 
     #[test]
     fn strip_signatures_one_key_has_strict_finality() {
-        let mut block_signatures = BlockSignatures::default();
+        let mut rng = TestRng::new();
+        let mut block_signatures: BlockSignatures = BlockSignaturesV2::new(
+            BlockHash::random(&mut rng),
+            100,
+            10.into(),
+            ChainNameDigest::from_chain_name("test"),
+        )
+        .into();
+
         // Create signatures for keys [1..3].
-        block_signatures
-            .proofs
-            .insert(KEYS[0].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[1].clone(), Signature::System);
-        block_signatures
-            .proofs
-            .insert(KEYS[2].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[0].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[1].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[2].clone(), Signature::System);
 
         let mut weights: BTreeMap<PublicKey, U512> = BTreeMap::default();
         // Add weights for keys [1..3].
@@ -260,11 +279,17 @@ mod tests {
 
     #[test]
     fn strip_signatures_single_key() {
-        let mut block_signatures = BlockSignatures::default();
+        let mut rng = TestRng::new();
+        let mut block_signatures: BlockSignatures = BlockSignaturesV2::new(
+            BlockHash::random(&mut rng),
+            100,
+            10.into(),
+            ChainNameDigest::from_chain_name("test"),
+        )
+        .into();
+
         // Create a signature for key 1.
-        block_signatures
-            .proofs
-            .insert(KEYS[0].clone(), Signature::System);
+        block_signatures.insert_signature(KEYS[0].clone(), Signature::System);
 
         let mut weights: BTreeMap<PublicKey, U512> = BTreeMap::default();
         // Add a weight for key 1.

@@ -5,10 +5,13 @@ use lmdb::Error as LmdbError;
 use thiserror::Error as ThisError;
 
 use crate::common::db::{
-    db_env, BlockBodyDatabase, BlockBodyMerkleDatabase, BlockHeaderDatabase, BlockMetadataDatabase,
-    Database, DeployDatabase, DeployHashesDatabase, DeployMetadataDatabase, Error as DbError,
-    FinalizedApprovalsDatabase, ProposerDatabase, StateStoreDatabase, TransferDatabase,
-    TransferHashesDatabase, STORAGE_FILE_NAME,
+    db_env, ApprovalsHashesDatabase, Database, DeployDatabase, Error as DbError,
+    FinalizedApprovalsDatabase, LegacyBlockBodyDatabase, LegacyBlockHeaderDatabase,
+    LegacyBlockMetadataDatabase, LegacyDeployMetadataDatabase, StateStoreDatabase,
+    TransactionsDatabase, TransferDatabase, VersionedApprovalsHashesDatabase,
+    VersionedBlockBodyDatabase, VersionedBlockHeaderDatabase, VersionedBlockMetadataDatabase,
+    VersionedExecutionResultsDatabase, VersionedFinalizedApprovalsDatabase,
+    VersionedTransfersDatabase, STORAGE_FILE_NAME,
 };
 
 pub const COMMAND_NAME: &str = "check";
@@ -110,37 +113,57 @@ fn check_db<P: AsRef<Path>>(
         .map_err(|lmdb_err| Error::Path(path.as_ref().to_path_buf(), lmdb_err))?;
     if let Some(db_name) = specific {
         match db_name.trim() {
-            "block_body" => BlockBodyDatabase::check_db(&env, failfast, start_at)?,
-            "block_body_merkle" => BlockBodyMerkleDatabase::check_db(&env, failfast, start_at)?,
-            "block_header" => BlockHeaderDatabase::check_db(&env, failfast, start_at)?,
-            "block_metadata" => BlockMetadataDatabase::check_db(&env, failfast, start_at)?,
-            "deploy_hashes" => DeployHashesDatabase::check_db(&env, failfast, start_at)?,
-            "deploy_metadata" => DeployMetadataDatabase::check_db(&env, failfast, start_at)?,
+            "block_body" => LegacyBlockBodyDatabase::check_db(&env, failfast, start_at)?,
+            "block_body_v2" => VersionedBlockBodyDatabase::check_db(&env, failfast, start_at)?,
+            "block_header" => LegacyBlockHeaderDatabase::check_db(&env, failfast, start_at)?,
+            "block_header_v2" => VersionedBlockHeaderDatabase::check_db(&env, failfast, start_at)?,
+            "block_metadata" => LegacyBlockMetadataDatabase::check_db(&env, failfast, start_at)?,
+            "block_metadata_v2" => {
+                VersionedBlockMetadataDatabase::check_db(&env, failfast, start_at)?
+            }
+            "deploy_metadata" => LegacyDeployMetadataDatabase::check_db(&env, failfast, start_at)?,
+            "execution_results" => {
+                VersionedExecutionResultsDatabase::check_db(&env, failfast, start_at)?
+            }
             "deploys" => DeployDatabase::check_db(&env, failfast, start_at)?,
+            "transactions" => TransactionsDatabase::check_db(&env, failfast, start_at)?,
             "finalized_approvals" => {
                 FinalizedApprovalsDatabase::check_db(&env, failfast, start_at)?
             }
-            "proposers" => ProposerDatabase::check_db(&env, failfast, start_at)?,
-            "state_store" => StateStoreDatabase::check_db(&env, failfast, start_at)?,
+            "versioned_finalized_approvals" => {
+                VersionedFinalizedApprovalsDatabase::check_db(&env, failfast, start_at)?
+            }
             "transfer" => TransferDatabase::check_db(&env, failfast, start_at)?,
-            "transfer_hashes" => TransferHashesDatabase::check_db(&env, failfast, start_at)?,
+            "versioned_transfers" => {
+                VersionedTransfersDatabase::check_db(&env, failfast, start_at)?
+            }
+            "state_store" => StateStoreDatabase::check_db(&env, failfast, start_at)?,
+            "approvals_hashes" => ApprovalsHashesDatabase::check_db(&env, failfast, start_at)?,
+            "versioned_approvals_hashes" => {
+                VersionedApprovalsHashesDatabase::check_db(&env, failfast, start_at)?
+            }
             _ => return Err(Error::UnknownDb(db_name.to_string())),
         }
     } else {
         // Sanity check for `start_at`, already validated in arg parser.
         assert_eq!(start_at, 0);
-        BlockBodyDatabase::check_db(&env, failfast, start_at)?;
-        BlockBodyMerkleDatabase::check_db(&env, failfast, start_at)?;
-        BlockHeaderDatabase::check_db(&env, failfast, start_at)?;
-        BlockMetadataDatabase::check_db(&env, failfast, start_at)?;
-        DeployHashesDatabase::check_db(&env, failfast, start_at)?;
-        DeployMetadataDatabase::check_db(&env, failfast, start_at)?;
+        LegacyBlockBodyDatabase::check_db(&env, failfast, start_at)?;
+        VersionedBlockBodyDatabase::check_db(&env, failfast, start_at)?;
+        LegacyBlockHeaderDatabase::check_db(&env, failfast, start_at)?;
+        VersionedBlockHeaderDatabase::check_db(&env, failfast, start_at)?;
+        LegacyBlockMetadataDatabase::check_db(&env, failfast, start_at)?;
+        VersionedBlockMetadataDatabase::check_db(&env, failfast, start_at)?;
+        LegacyDeployMetadataDatabase::check_db(&env, failfast, start_at)?;
+        VersionedExecutionResultsDatabase::check_db(&env, failfast, start_at)?;
         DeployDatabase::check_db(&env, failfast, start_at)?;
+        TransactionsDatabase::check_db(&env, failfast, start_at)?;
         FinalizedApprovalsDatabase::check_db(&env, failfast, start_at)?;
-        ProposerDatabase::check_db(&env, failfast, start_at)?;
-        StateStoreDatabase::check_db(&env, failfast, start_at)?;
+        VersionedFinalizedApprovalsDatabase::check_db(&env, failfast, start_at)?;
         TransferDatabase::check_db(&env, failfast, start_at)?;
-        TransferHashesDatabase::check_db(&env, failfast, start_at)?;
+        VersionedTransfersDatabase::check_db(&env, failfast, start_at)?;
+        StateStoreDatabase::check_db(&env, failfast, start_at)?;
+        ApprovalsHashesDatabase::check_db(&env, failfast, start_at)?;
+        VersionedApprovalsHashesDatabase::check_db(&env, failfast, start_at)?;
     };
     Ok(())
 }

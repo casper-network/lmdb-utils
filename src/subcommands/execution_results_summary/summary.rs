@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use casper_types::{bytesrepr::ToBytes, ExecutionResult};
+use casper_types::{bytesrepr::ToBytes, execution::ExecutionResult};
 use serde::{Deserialize, Serialize};
 
 use super::Error;

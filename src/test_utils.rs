@@ -1,22 +1,16 @@
 #![cfg(test)]
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fs::OpenOptions,
-    path::PathBuf,
-};
+use std::collections::BTreeMap;
 
-use lmdb::{Database as LmdbDatabase, DatabaseFlags, Environment, EnvironmentFlags};
+use casper_storage::block_store::lmdb::LmdbBlockStore;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 
-use casper_hashing::Digest;
-use casper_node::types::{BlockHash, DeployHash, DeployMetadata};
 use casper_types::{
-    EraId, ExecutionEffect, ExecutionResult, ProtocolVersion, PublicKey, SecretKey, Timestamp,
-    U256, U512,
+    execution::ExecutionResult, EraId, ProtocolVersion, PublicKey, SecretKey, Timestamp, U256, U512,
 };
+use casper_types::{execution::ExecutionResultV2, testing::TestRng, BlockHash, Digest};
 
 pub(crate) static KEYS: Lazy<Vec<PublicKey>> = Lazy::new(|| {
     (0..10)
@@ -32,75 +26,28 @@ pub(crate) static KEYS: Lazy<Vec<PublicKey>> = Lazy::new(|| {
 });
 
 pub struct LmdbTestFixture {
-    pub env: Environment,
-    pub dbs: HashMap<&'static str, LmdbDatabase>,
     pub tmp_dir: TempDir,
-    pub file_path: PathBuf,
+    pub block_store: LmdbBlockStore,
 }
 
 impl LmdbTestFixture {
-    pub fn new(names: Vec<&'static str>, file_name: Option<&str>) -> Self {
+    pub fn new() -> Self {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let file_path = if let Some(name) = file_name {
-            let path = tmp_dir.as_ref().join(name);
-            let _ = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            path
-        } else {
-            let path = NamedTempFile::new_in(tmp_dir.as_ref())
-                .unwrap()
-                .path()
-                .to_path_buf();
-            let _ = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            path
-        };
-        let env = Environment::new()
-            .set_flags(
-                EnvironmentFlags::WRITE_MAP
-                    | EnvironmentFlags::NO_SUB_DIR
-                    | EnvironmentFlags::NO_TLS
-                    | EnvironmentFlags::NO_READAHEAD,
-            )
-            .set_max_readers(12)
-            .set_map_size(4096 * 1024)
-            .set_max_dbs(10)
-            .open(&file_path)
-            .expect("can't create environment");
-        let mut dbs = HashMap::new();
-        if names.is_empty() {
-            let db = env
-                .create_db(None, DatabaseFlags::empty())
-                .expect("can't create database");
-            dbs.insert("default", db);
-        } else {
-            for name in names {
-                let db = env
-                    .create_db(Some(name), DatabaseFlags::empty())
-                    .expect("can't create database");
-                dbs.insert(name, db);
-            }
-        }
 
-        LmdbTestFixture {
-            env,
-            dbs,
-            tmp_dir,
-            file_path,
-        }
+        Self::from_temp_dir(tmp_dir)
     }
 
-    pub fn db(&self, maybe_name: Option<&str>) -> Option<&LmdbDatabase> {
-        if let Some(name) = maybe_name {
-            self.dbs.get(name)
-        } else {
-            self.dbs.get("default")
+    pub fn destructure(self) -> (LmdbBlockStore, TempDir) {
+        (self.block_store, self.tmp_dir)
+    }
+
+    pub fn from_temp_dir(tmp_dir: TempDir) -> Self {
+        let block_store =
+            LmdbBlockStore::new(tmp_dir.path(), 4096 * 1024).expect("can't create the block store");
+
+        LmdbTestFixture {
+            block_store,
+            tmp_dir,
         }
     }
 }
@@ -139,47 +86,11 @@ impl Default for MockBlockHeader {
     }
 }
 
-pub(crate) fn mock_deploy_hash(idx: u8) -> DeployHash {
-    DeployHash::new([idx; 32].into())
-}
+pub(crate) fn success_execution_result(rng: &mut TestRng) -> ExecutionResult {
+    let mut exec_result = ExecutionResultV2::random(rng);
+    exec_result.error_message = None;
 
-pub(crate) fn mock_block_header(idx: u8) -> (BlockHash, MockBlockHeader) {
-    let mut block_header = MockBlockHeader::default();
-    let block_hash_digest: Digest = [idx; Digest::LENGTH].into();
-    let block_hash: BlockHash = block_hash_digest.into();
-    block_header.body_hash = [idx; Digest::LENGTH].into();
-    (block_hash, block_header)
-}
-
-pub(crate) fn mock_switch_block_header(idx: u8) -> (BlockHash, MockSwitchBlockHeader) {
-    let mut block_header = MockSwitchBlockHeader::default();
-    let block_hash_digest: Digest = {
-        let mut bytes = [idx; Digest::LENGTH];
-        bytes[Digest::LENGTH - 1] = 255;
-        bytes
-    }
-    .into();
-    let block_hash: BlockHash = block_hash_digest.into();
-    block_header.body_hash = [idx; Digest::LENGTH].into();
-    (block_hash, block_header)
-}
-
-pub(crate) fn mock_deploy_metadata(block_hashes: &[BlockHash]) -> DeployMetadata {
-    let mut deploy_metadata = DeployMetadata::default();
-    for block_hash in block_hashes {
-        deploy_metadata
-            .execution_results
-            .insert(*block_hash, success_execution_result());
-    }
-    deploy_metadata
-}
-
-pub(crate) fn success_execution_result() -> ExecutionResult {
-    ExecutionResult::Success {
-        effect: ExecutionEffect::default(),
-        transfers: vec![],
-        cost: 100.into(),
-    }
+    exec_result.into()
 }
 
 #[derive(Clone, Debug, Default, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -207,17 +118,6 @@ pub struct MockSwitchBlockHeader {
     pub era_id: EraId,
     pub height: u64,
     pub protocol_version: ProtocolVersion,
-}
-
-impl MockSwitchBlockHeader {
-    pub fn insert_key_weight(&mut self, key: PublicKey, weight: U512) {
-        let _ = self
-            .era_end
-            .as_mut()
-            .unwrap()
-            .next_era_validator_weights
-            .insert(key, weight);
-    }
 }
 
 impl Default for MockSwitchBlockHeader {

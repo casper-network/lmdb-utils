@@ -83,26 +83,35 @@ fn unsparse(path: &Path) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use casper_storage::block_store::{BlockStoreProvider, BlockStoreTransaction, DataWriter};
+    use casper_types::{testing::TestRng, Block, TestBlockBuilder};
+
     use super::*;
-    use crate::test_utils::LmdbTestFixture;
+    use crate::{common::db::STORAGE_FILE_NAME, test_utils::LmdbTestFixture};
 
     #[test]
     fn should_reduce_lmdb_file_size() {
-        let fixture = LmdbTestFixture::new(vec!["a"], None);
-        let db_path = fixture.file_path.as_path();
+        let mut rng = TestRng::new();
+        let mut fixture = LmdbTestFixture::new();
+        let block: Block = TestBlockBuilder::new().build(&mut rng).into();
+        let mut rw_txn = fixture.block_store.checkout_rw().unwrap();
+        let _ = rw_txn.write(&block).unwrap();
+        rw_txn.commit().unwrap();
+
+        let db_path = fixture.tmp_dir.path().join(STORAGE_FILE_NAME);
         let db_size = || {
-            fs::metadata(db_path)
+            fs::metadata(db_path.as_path())
                 .unwrap_or_else(|error| {
                     panic!("should get metadata for {}: {}", db_path.display(), error)
                 })
                 .len()
         };
         let size_before = db_size();
-        unsparse(db_path).expect("unsparse should succeed");
+        unsparse(db_path.as_path()).expect("unsparse should succeed");
         let size_after = db_size();
         assert!(size_after < size_before, "unsparse should reduce file size");
 
-        assert!(unsparse(db_path).is_err(), "repeat unsparse should fail");
+        assert!(unsparse(&db_path).is_err(), "repeat unsparse should fail");
         assert_eq!(db_size(), size_after, "file size should be unchanged");
     }
 }

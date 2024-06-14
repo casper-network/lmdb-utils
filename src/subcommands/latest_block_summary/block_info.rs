@@ -7,12 +7,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use casper_hashing::Digest;
-use casper_node::types::{BlockHash, BlockHeader};
+use casper_types::Digest;
+use casper_types::{BlockHash, BlockHeader};
 use casper_types::{EraId, ProtocolVersion, Timestamp};
-
-#[cfg(test)]
-use crate::test_utils::MockBlockHeader;
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct BlockInfo {
@@ -27,13 +24,9 @@ pub struct BlockInfo {
 }
 
 impl BlockInfo {
-    pub fn new(
-        network_name: Option<String>,
-        block_hash: BlockHash,
-        block_header: BlockHeader,
-    ) -> Self {
+    pub fn new(network_name: Option<String>, block_header: BlockHeader) -> Self {
         Self {
-            block_hash,
+            block_hash: block_header.block_hash(),
             network_name,
             body_hash: *block_header.body_hash(),
             era_id: block_header.era_id(),
@@ -42,25 +35,6 @@ impl BlockInfo {
             state_root_hash: *block_header.state_root_hash(),
             timestamp: block_header.timestamp(),
         }
-    }
-
-    #[cfg(test)]
-    pub fn into_mock(self) -> (MockBlockHeader, Option<String>) {
-        (
-            MockBlockHeader {
-                body_hash: self.body_hash,
-                era_id: self.era_id,
-                height: self.height,
-                protocol_version: self.protocol_version,
-                state_root_hash: self.state_root_hash,
-                timestamp: self.timestamp,
-                parent_hash: Default::default(),
-                random_bit: Default::default(),
-                accumulated_seed: Default::default(),
-                era_end: None,
-            },
-            self.network_name,
-        )
     }
 }
 

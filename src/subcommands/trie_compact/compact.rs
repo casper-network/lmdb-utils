@@ -4,14 +4,23 @@ use std::{
     path::Path,
 };
 
+use casper_storage::{
+    block_store::{
+        lmdb::{IndexedLmdbBlockStore, LmdbBlockStore},
+        types::{BlockHeight, Tip},
+        BlockStoreProvider, DataReader,
+    },
+    data_access_layer::FlushRequest,
+    global_state::state::StateProvider,
+};
 use log::info;
 
-use casper_hashing::Digest;
+use casper_types::{Block, Digest, ProtocolVersion};
 
 use crate::common::db::TRIE_STORE_FILE_NAME;
 
 use super::{
-    utils::{create_execution_engine, create_storage, load_execution_engine},
+    utils::{create_data_access_layer, load_data_access_layer},
     Error,
 };
 
@@ -141,27 +150,31 @@ pub fn trie_compact<P1: AsRef<Path>, P2: AsRef<Path>, P3: AsRef<Path>>(
 ) -> Result<(), Error> {
     validate_trie_paths(&source_trie_path, &destination_trie_path, dest_opt)?;
 
-    let (source_state, _env) =
-        load_execution_engine(source_trie_path, max_db_size, Digest::default(), true)
+    let source_state =
+        load_data_access_layer(source_trie_path, max_db_size, Digest::default(), true)
             .map_err(Error::OpenSourceTrie)?;
 
-    let (destination_state, _env) =
-        create_execution_engine(destination_trie_path, max_db_size, true)
-            .map_err(Error::CreateDestTrie)?;
+    let destination_state = create_data_access_layer(destination_trie_path, max_db_size, true)
+        .map_err(Error::CreateDestTrie)?;
 
-    // Create a separate lmdb for block/deploy storage at chain_download_path.
-    let storage = create_storage(&storage_path).map_err(Error::OpenStorage)?;
+    // Create a separate lmdb for block store at chain_download_path.
+    let block_store =
+        LmdbBlockStore::new(storage_path.as_ref(), max_db_size).map_err(Error::OpenStorage)?;
+    let indexed_block_store =
+        IndexedLmdbBlockStore::new(block_store, None, ProtocolVersion::from_parts(0, 0, 0))
+            .map_err(Error::OpenStorage)?;
+    let ro_txn = indexed_block_store
+        .checkout_ro()
+        .map_err(Error::OpenStorage)?;
 
-    let mut block = match storage
-        .read_highest_block()
-        .map_err(|err| Error::Storage(0, err))?
-    {
-        Some(block) => block,
-        None => {
-            info!("No blocks found in storage, exiting.");
-            return Ok(());
-        }
-    };
+    let mut block =
+        match DataReader::<Tip, Block>::read(&ro_txn, Tip).map_err(|err| Error::Storage(0, err))? {
+            Some(block) => block,
+            None => {
+                info!("No blocks found in storage, exiting.");
+                return Ok(());
+            }
+        };
     let mut visited_roots = HashSet::new();
     let mut block_height;
 
@@ -173,15 +186,15 @@ pub fn trie_compact<P1: AsRef<Path>, P2: AsRef<Path>, P3: AsRef<Path>>(
             super::helpers::copy_state_root(state_root, &source_state, &destination_state)
                 .map_err(|err| Error::CopyStateRoot(state_root, err))?;
             destination_state
-                .flush_environment()
-                .map_err(Error::LmdbOperation)?;
+                .flush(FlushRequest::new())
+                .as_error()
+                .map_err(Error::GlobalState)?;
             visited_roots.insert(state_root);
         }
         if block_height == 0 {
             break;
         }
-        block = storage
-            .read_block_by_height(block_height - 1)
+        block = DataReader::<BlockHeight, Block>::read(&ro_txn, block_height - 1)
             .map_err(|storage_err| Error::Storage(block_height - 1, storage_err))?
             .ok_or(Error::MissingBlock(block_height - 1))?;
     }

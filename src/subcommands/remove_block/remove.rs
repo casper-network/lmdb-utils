@@ -1,89 +1,48 @@
 use std::path::Path;
 
-use casper_node::types::{BlockHash, BlockHeader, DeployMetadata};
-use lmdb::{Error as LmdbError, Transaction, WriteFlags};
-use log::warn;
-
-use crate::{
-    common::db::{
-        self, BlockBodyDatabase, BlockHeaderDatabase, Database, DeployMetadataDatabase,
-        STORAGE_FILE_NAME,
-    },
-    subcommands::execution_results_summary::block_body::BlockBody,
+use crate::common::db::{
+    DEFAULT_MAX_BLOCK_STORE_SIZE, DEFAULT_MAX_DEPLOY_METADATA_STORE_SIZE,
+    DEFAULT_MAX_DEPLOY_STORE_SIZE,
 };
 
 use super::Error;
+use casper_storage::block_store::{
+    lmdb::LmdbBlockStore,
+    types::{ApprovalsHashes, BlockExecutionResults, BlockHashHeightAndEra, BlockTransfers},
+    BlockStoreProvider, BlockStoreTransaction, DataReader, DataWriter,
+};
+use casper_types::{Block, BlockHash, BlockHeader, BlockSignatures, Transaction, TransactionHash};
 
 pub(crate) fn remove_block<P: AsRef<Path>>(db_path: P, block_hash: BlockHash) -> Result<(), Error> {
-    let storage_path = db_path.as_ref().join(STORAGE_FILE_NAME);
-    let env = db::db_env(storage_path)?;
+    let mut block_store = LmdbBlockStore::new(
+        db_path.as_ref(),
+        DEFAULT_MAX_BLOCK_STORE_SIZE
+            + DEFAULT_MAX_DEPLOY_STORE_SIZE
+            + DEFAULT_MAX_DEPLOY_METADATA_STORE_SIZE,
+    )?;
 
-    let mut txn = env.begin_rw_txn()?;
-    let header_db = unsafe { txn.open_db(Some(BlockHeaderDatabase::db_name()))? };
-    let body_db = unsafe { txn.open_db(Some(BlockBodyDatabase::db_name()))? };
-    let deploy_metadata_db = unsafe { txn.open_db(Some(DeployMetadataDatabase::db_name()))? };
+    let mut rw_txn = block_store.checkout_rw()?;
 
-    let header: BlockHeader = match txn.get(header_db, &block_hash) {
-        Ok(raw_header) => bincode::deserialize(raw_header)
-            .map_err(|bincode_err| Error::HeaderParsing(block_hash, bincode_err))?,
-        Err(LmdbError::NotFound) => {
-            return Err(Error::MissingHeader(block_hash));
-        }
-        Err(lmdb_err) => {
-            return Err(lmdb_err.into());
-        }
+    let maybe_block_header: Option<BlockHeader> = rw_txn.read(block_hash)?;
+    let block_info = if let Some(header) = maybe_block_header {
+        BlockHashHeightAndEra::new(block_hash, header.height(), header.era_id())
+    } else {
+        return Err(Error::MissingHeader(block_hash));
     };
 
-    let maybe_body: Option<BlockBody> = match txn.get(body_db, header.body_hash()) {
-        Ok(raw_body) => Some(
-            bincode::deserialize(raw_body)
-                .map_err(|bincode_err| Error::BodyParsing(block_hash, bincode_err))?,
-        ),
-        Err(LmdbError::NotFound) => {
-            warn!(
-                "No block body found for block header with hash {}",
-                block_hash
-            );
-            None
+    let maybe_block: Option<Block> = rw_txn.read(block_hash)?;
+    if let Some(block) = maybe_block {
+        for transaction_hash in block.all_transaction_hashes() {
+            DataWriter::<TransactionHash, Transaction>::delete(&mut rw_txn, transaction_hash)?;
         }
-        Err(lmdb_err) => {
-            return Err(lmdb_err.into());
-        }
-    };
-
-    if let Some(body) = maybe_body {
-        // Go through all the deploys in this block and get the execution
-        // result of each one.
-        for deploy_hash in body.deploy_hashes() {
-            // Get this deploy's metadata.
-            let mut metadata: DeployMetadata = match txn.get(deploy_metadata_db, deploy_hash) {
-                Ok(raw_metadata) => bincode::deserialize(raw_metadata).map_err(|bincode_err| {
-                    Error::ExecutionResultsParsing(block_hash, *deploy_hash, bincode_err)
-                })?,
-                Err(LmdbError::NotFound) => return Err(Error::MissingDeploy(*deploy_hash)),
-                Err(lmdb_error) => return Err(lmdb_error.into()),
-            };
-            // Extract the execution result of this deploy for the current block.
-            if let Some(_execution_result) = metadata.execution_results.remove(&block_hash) {
-                if metadata.execution_results.is_empty() {
-                    txn.del(deploy_metadata_db, deploy_hash, None)?;
-                } else {
-                    let encoded_metadata = bincode::serialize(&metadata)
-                        .map_err(|bincode_err| Error::Serialization(*deploy_hash, bincode_err))?;
-                    txn.put(
-                        deploy_metadata_db,
-                        deploy_hash,
-                        &encoded_metadata,
-                        WriteFlags::default(),
-                    )?;
-                }
-            }
-        }
-
-        txn.del(body_db, header.body_hash(), None)?;
     }
 
-    txn.del(header_db, &block_hash, None)?;
-    txn.commit()?;
+    DataWriter::<BlockHashHeightAndEra, BlockExecutionResults>::delete(&mut rw_txn, block_info)?;
+    DataWriter::<BlockHash, BlockTransfers>::delete(&mut rw_txn, block_hash)?;
+    DataWriter::<BlockHash, BlockSignatures>::delete(&mut rw_txn, block_hash)?;
+    DataWriter::<BlockHash, ApprovalsHashes>::delete(&mut rw_txn, block_hash)?;
+    DataWriter::<BlockHash, Block>::delete(&mut rw_txn, block_hash)?;
+
+    rw_txn.commit()?;
     Ok(())
 }

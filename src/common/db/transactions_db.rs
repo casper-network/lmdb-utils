@@ -3,25 +3,25 @@ use std::{
     result::Result,
 };
 
-use casper_types::Deploy;
+use casper_types::{bytesrepr::FromBytes, Transaction};
 
 use super::{Database, DeserializationError};
 
-pub struct DeployDatabase;
+pub struct TransactionsDatabase;
 
-impl Display for DeployDatabase {
+impl Display for TransactionsDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
-        write!(f, "deploys")
+        write!(f, "transactions")
     }
 }
 
-impl Database for DeployDatabase {
+impl Database for TransactionsDatabase {
     fn db_name() -> &'static str {
-        "deploys"
+        "transactions"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: Deploy = bincode::deserialize(bytes)?;
+        let _: Transaction = FromBytes::from_bytes(bytes)?.0;
         Ok(())
     }
 }

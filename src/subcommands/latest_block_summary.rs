@@ -3,9 +3,9 @@ mod read_db;
 #[cfg(test)]
 mod tests;
 
-use std::{array::TryFromSliceError, io::Error as IoError, path::Path};
+use std::{io::Error as IoError, path::Path};
 
-use bincode::Error as BincodeError;
+use casper_storage::block_store::BlockStoreError;
 use clap::{Arg, ArgMatches, Command};
 use lmdb::Error as LmdbError;
 use serde_json::Error as SerializationError;
@@ -21,9 +21,6 @@ const OUTPUT: &str = "output";
 pub enum Error {
     #[error("No blocks found in the block header database")]
     EmptyDatabase,
-    /// Parsing error on entry at index in the database.
-    #[error("Error parsing element {0}: {1}")]
-    Parsing(usize, BincodeError),
     /// Database operation error.
     #[error("Error operating the database: {0}")]
     Database(#[from] LmdbError),
@@ -31,8 +28,8 @@ pub enum Error {
     Serialize(#[from] SerializationError),
     #[error("Error writing output: {0}")]
     Output(#[from] IoError),
-    #[error("Invalid block hash {err:?} {val}")]
-    InvalidBlockHash { err: TryFromSliceError, val: String },
+    #[error("Block store error: {0}")]
+    BlockStore(#[from] BlockStoreError),
 }
 
 enum DisplayOrder {

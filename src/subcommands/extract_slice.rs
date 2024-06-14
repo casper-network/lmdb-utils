@@ -1,4 +1,3 @@
-mod db_helpers;
 mod extract;
 mod global_state;
 mod storage;
@@ -8,10 +7,12 @@ mod tests;
 use std::{io::Error as IoError, path::Path};
 
 use bincode::Error as BincodeError;
-use casper_hashing::Digest;
-use casper_node::types::BlockHash;
+use casper_storage::block_store::BlockStoreError;
+use casper_storage::global_state::error::Error as GlobalStateError;
+use casper_types::BlockHash;
+use casper_types::Digest;
+use casper_types::TransactionHash;
 use clap::{Arg, ArgMatches, Command};
-use lmdb::Error as LmdbError;
 use thiserror::Error as ThisError;
 
 use self::extract::SliceIdentifier;
@@ -30,15 +31,21 @@ pub enum Error {
     #[error("Error creating the destination execution engine: {0}")]
     CreateExecutionEngine(anyhow::Error),
     #[error("Error operating the database: {0}")]
-    Database(#[from] LmdbError),
+    GlobalState(#[from] GlobalStateError),
     #[error("Error loading the source execution engine: {0}")]
     LoadExecutionEngine(anyhow::Error),
     #[error("Error writing output: {0}")]
     Output(#[from] IoError),
-    #[error("Error parsing element for block hash {0} in {1} DB: {2}")]
-    Parsing(BlockHash, String, BincodeError),
     #[error("Error transferring state root: {0}")]
     StateRootTransfer(anyhow::Error),
+    #[error("Encountered an error with the block store: {0}")]
+    BlockStore(#[from] BlockStoreError),
+    #[error("Missing block with hash: {0}")]
+    MissingBlock(BlockHash),
+    #[error("Missing transaction with hash: {0}")]
+    MissingTransaction(TransactionHash),
+    #[error("Missing execution result for transaction with hash: {0}")]
+    MissingExecutionResult(TransactionHash),
 }
 
 enum DisplayOrder {

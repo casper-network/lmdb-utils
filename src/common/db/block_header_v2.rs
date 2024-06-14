@@ -3,25 +3,25 @@ use std::{
     result::Result,
 };
 
-use casper_types::{bytesrepr::FromBytes, PublicKey};
+use casper_types::{bytesrepr::FromBytes, BlockHeader};
 
 use super::{Database, DeserializationError};
 
-pub struct ProposerDatabase;
+pub struct VersionedBlockHeaderDatabase;
 
-impl Display for ProposerDatabase {
+impl Display for VersionedBlockHeaderDatabase {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatterResult {
-        write!(f, "proposers")
+        write!(f, "block_header_v2")
     }
 }
 
-impl Database for ProposerDatabase {
+impl Database for VersionedBlockHeaderDatabase {
     fn db_name() -> &'static str {
-        "proposers"
+        "block_header_v2"
     }
 
     fn parse_element(bytes: &[u8]) -> Result<(), DeserializationError> {
-        let _: PublicKey = FromBytes::from_bytes(bytes)?.0;
+        let _: BlockHeader = FromBytes::from_bytes(bytes)?.0;
         Ok(())
     }
 }

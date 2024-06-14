@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use casper_hashing::Digest;
-use casper_node::types::BlockHash;
+use casper_types::BlockHash;
+use casper_types::Digest;
 
 use super::{global_state, storage, Error};
 
@@ -15,7 +15,7 @@ pub fn extract_slice<P1: AsRef<Path>, P2: AsRef<Path>>(
     output: P2,
     slice_identifier: SliceIdentifier,
 ) -> Result<(), Error> {
-    storage::create_output_db(&output)?;
+    storage::create_output_db_dir(&output)?;
     let state_root_hash = match slice_identifier {
         SliceIdentifier::BlockHash(block_hash) => {
             storage::transfer_block_info(&db_path, &output, block_hash)?
