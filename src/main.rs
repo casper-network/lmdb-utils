@@ -1,7 +1,6 @@
 mod common;
 mod logging;
 mod subcommands;
-#[cfg(test)]
 pub(crate) mod test_utils;
 
 use std::{fs::OpenOptions, process};

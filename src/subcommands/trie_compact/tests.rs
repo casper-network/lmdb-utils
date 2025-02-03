@@ -163,7 +163,7 @@ fn copy_state_root_roundtrip() {
                     // Hashes should be equal.
                     assert_eq!(
                         trie_in_data.unwrap().0,
-                        Digest::hash(&trie.to_bytes().unwrap())
+                        Digest::hash(trie.to_bytes().unwrap())
                     );
                 }
                 None => panic!(),

@@ -120,6 +120,7 @@ fn latest_block_should_succeed() {
         fixture.tmp_dir.as_ref(),
         Some(out_file_path.as_path()),
         false,
+        false,
     )
     .unwrap();
     let json_str = fs::read_to_string(&out_file_path).unwrap();
@@ -138,7 +139,8 @@ fn latest_block_should_succeed() {
     assert!(read_db::latest_block_summary(
         fixture.tmp_dir.as_ref(),
         Some(out_file_path.as_path()),
-        false
+        false,
+        false,
     )
     .is_err());
     // We use `overwrite` on the previous output file.
@@ -146,6 +148,7 @@ fn latest_block_should_succeed() {
         fixture.tmp_dir.as_ref(),
         Some(out_file_path.as_path()),
         true,
+        false,
     )
     .unwrap();
     let json_str = fs::read_to_string(&out_file_path).unwrap();
@@ -161,7 +164,8 @@ fn latest_block_empty_db_should_fail() {
     assert!(read_db::latest_block_summary(
         fixture.tmp_dir.as_ref(),
         Some(out_file_path.as_path()),
-        false
+        false,
+        false,
     )
     .is_err());
 }
@@ -178,7 +182,8 @@ fn latest_block_existing_output_should_fail() {
     assert!(read_db::latest_block_summary(
         fixture.tmp_dir.as_ref(),
         Some(out_file_path.as_path()),
-        false
+        false,
+        false,
     )
     .is_err());
 }

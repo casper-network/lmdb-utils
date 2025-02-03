@@ -172,7 +172,7 @@ fn transfer_blocks() {
     block_bodies.push(BlockBody::new(vec![deploy_hashes[2], deploy_hashes[3]]));
     block_body_deploy_map.push(vec![2, 3]);
 
-    let deploy_metadatas = vec![
+    let deploy_metadatas = [
         mock_deploy_metadata(slice::from_ref(&block_headers[0].0)),
         mock_deploy_metadata(&[block_headers[0].0, block_headers[1].0]),
         mock_deploy_metadata(&[block_headers[1].0, block_headers[2].0]),
@@ -475,7 +475,7 @@ fn transfer_global_state_information() {
     let destination_store = LmdbTrieStore::new(&dst_env, None, DatabaseFlags::empty()).unwrap();
     {
         let txn = dst_env.create_read_write_txn().unwrap();
-        let keys = vec![data[1].0, data[2].0, data[4].0];
+        let keys = [data[1].0, data[2].0, data[4].0];
         let entries: Vec<Option<Trie<Bytes, Bytes>>> =
             destination_store.get_many(&txn, keys.iter()).unwrap();
         for entry in entries {
@@ -488,7 +488,7 @@ fn transfer_global_state_information() {
                     // Hashes should be equal.
                     assert_eq!(
                         trie_in_data.unwrap().0,
-                        Digest::hash(&trie.to_bytes().unwrap())
+                        Digest::hash(trie.to_bytes().unwrap())
                     );
                 }
                 None => panic!(),

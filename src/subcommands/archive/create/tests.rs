@@ -27,7 +27,7 @@ fn create_mock_src_dir() -> (TempDir, TestPayloads) {
     let mut payloads = [[0u8; TEST_FILE_SIZE]; NUM_TEST_FILES];
     for (idx, payload) in payloads.iter_mut().enumerate().take(NUM_TEST_FILES) {
         rng.fill_bytes(payload);
-        fs::write(src_dir.path().join(&format!("file_{idx}")), &payload).unwrap();
+        fs::write(src_dir.path().join(format!("file_{idx}")), &payload).unwrap();
     }
     (src_dir, TestPayloads { payloads })
 }
@@ -54,7 +54,7 @@ fn archive_create_roundtrip() {
     // Unpack and then delete the archive.
     unpack_mock_archive(&archive_path, &out_dir);
     for idx in 0..NUM_TEST_FILES {
-        let contents = fs::read(out_dir.path().join(&format!("file_{idx}"))).unwrap();
+        let contents = fs::read(out_dir.path().join(format!("file_{idx}"))).unwrap();
         if contents != test_payloads.payloads[idx] {
             panic!("Contents of file {idx} are different from the original");
         }
@@ -79,7 +79,7 @@ fn archive_create_overwrite() {
     // Unpack and then delete the archive.
     unpack_mock_archive(&archive_path, &out_dir);
     for idx in 0..NUM_TEST_FILES {
-        let contents = fs::read(out_dir.path().join(&format!("file_{idx}"))).unwrap();
+        let contents = fs::read(out_dir.path().join(format!("file_{idx}"))).unwrap();
         if contents != test_payloads.payloads[idx] {
             panic!("Contents of file {idx} are different from the original");
         }

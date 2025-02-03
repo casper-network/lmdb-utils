@@ -40,7 +40,7 @@ fn remove_block_should_work() {
     block_bodies.push(BlockBody::new(vec![deploy_hashes[1], deploy_hashes[2]]));
     block_body_deploy_map.push(vec![1, 2]);
 
-    let deploy_metadatas = vec![
+    let deploy_metadatas = [
         mock_deploy_metadata(slice::from_ref(&block_headers[0].0)),
         mock_deploy_metadata(&[block_headers[0].0, block_headers[1].0]),
         mock_deploy_metadata(slice::from_ref(&block_headers[1].0)),
@@ -195,7 +195,7 @@ fn remove_block_no_deploys() {
     block_bodies.push(BlockBody::new(vec![deploy_hashes[1], deploy_hashes[2]]));
     block_body_deploy_map.push(vec![1, 2]);
 
-    let deploy_metadatas = vec![
+    let deploy_metadatas = [
         mock_deploy_metadata(&[]),
         mock_deploy_metadata(slice::from_ref(&block_headers[1].0)),
         mock_deploy_metadata(slice::from_ref(&block_headers[1].0)),
@@ -368,7 +368,7 @@ fn remove_block_missing_body() {
     block_bodies.push(BlockBody::new(vec![deploy_hashes[1], deploy_hashes[2]]));
     block_body_deploy_map.push(vec![1, 2]);
 
-    let deploy_metadatas = vec![
+    let deploy_metadatas = [
         mock_deploy_metadata(slice::from_ref(&block_headers[0].0)),
         mock_deploy_metadata(&[block_headers[0].0, block_headers[1].0]),
         mock_deploy_metadata(slice::from_ref(&block_headers[1].0)),

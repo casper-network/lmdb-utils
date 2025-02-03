@@ -15,6 +15,7 @@ pub const COMMAND_NAME: &str = "latest-block-summary";
 const DB_PATH: &str = "db-path";
 const OVERWRITE: &str = "overwrite";
 const OUTPUT: &str = "output";
+const AT_ERA_END: &str = "at-era-end";
 
 /// Errors encountered when operating on the storage database.
 #[derive(Debug, ThisError)]
@@ -39,6 +40,7 @@ enum DisplayOrder {
     DbPath,
     Output,
     Overwrite,
+    AtEraEnd,
 }
 
 pub fn command(display_order: usize) -> Command<'static> {
@@ -83,11 +85,21 @@ pub fn command(display_order: usize) -> Command<'static> {
                     directory.",
                 ),
         )
+        .arg(
+            Arg::new(AT_ERA_END)
+                .display_order(DisplayOrder::AtEraEnd as usize)
+                .required(false)
+                .short('e')
+                .long(AT_ERA_END)
+                .takes_value(false)
+                .help("Find latest era end (switch) block."),
+        )
 }
 
 pub fn run(matches: &ArgMatches) -> Result<(), Error> {
     let path = Path::new(matches.value_of(DB_PATH).expect("should have db-path arg"));
     let output = matches.value_of(OUTPUT).map(Path::new);
     let overwrite = matches.is_present(OVERWRITE);
-    read_db::latest_block_summary(path, output, overwrite)
+    let must_be_era_end = matches.is_present(AT_ERA_END);
+    read_db::latest_block_summary(path, output, overwrite, must_be_era_end)
 }

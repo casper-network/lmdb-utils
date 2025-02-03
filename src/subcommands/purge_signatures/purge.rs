@@ -58,7 +58,7 @@ impl EraWeights {
         let switch_block_hash = indices
             .switch_blocks
             .get(&era_id)
-            .ok_or_else(|| Error::MissingEraWeights(era_id))?;
+            .ok_or(Error::MissingEraWeights(era_id))?;
         // Deserialize it.
         let switch_block_header: BlockHeader =
             bincode::deserialize(txn.get(db, &switch_block_hash)?)
@@ -71,7 +71,7 @@ impl EraWeights {
         let weights = switch_block_header
             .next_era_validator_weights()
             .cloned()
-            .ok_or_else(|| Error::MissingEraWeights(era_id))?;
+            .ok_or(Error::MissingEraWeights(era_id))?;
         self.weights = weights;
         self.era_id = era_id;
         Ok(self.era_after_upgrade)

@@ -26,6 +26,7 @@ use super::{
 fn get_highest_block(
     env: &Environment,
     log_progress: bool,
+    must_be_switch_block: bool,
 ) -> Result<(BlockHash, BlockHeader), Error> {
     let txn = env.begin_ro_txn()?;
     let db = unsafe { txn.open_db(Some(BlockHeaderDatabase::db_name()))? };
@@ -60,13 +61,17 @@ fn get_highest_block(
         for (idx, (raw_key, raw_val)) in cursor.iter().enumerate() {
             let header: BlockHeader = bincode::deserialize(raw_val)
                 .map_err(|bincode_err| Error::Parsing(idx, bincode_err))?;
-            if header.height() >= max_height {
-                max_height = header.height();
-                let _ = max_height_key.replace(raw_key);
-            }
 
             if let Some(progress_tracker) = maybe_progress_tracker.as_mut() {
                 progress_tracker.advance_by(1);
+            }
+            if must_be_switch_block && !header.is_switch_block() {
+                continue;
+            }
+
+            if header.height() >= max_height {
+                max_height = header.height();
+                let _ = max_height_key.replace(raw_key);
             }
         }
     }
@@ -104,6 +109,7 @@ pub fn latest_block_summary<P1: AsRef<Path>, P2: AsRef<Path>>(
     db_path: P1,
     output: Option<P2>,
     overwrite: bool,
+    must_be_era_end: bool,
 ) -> Result<(), Error> {
     let storage_path = db_path.as_ref().join(STORAGE_FILE_NAME);
     let env = db::db_env(storage_path)?;
@@ -128,7 +134,7 @@ pub fn latest_block_summary<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     };
 
-    let (block_hash, highest_block) = get_highest_block(&env, log_progress)?;
+    let (block_hash, highest_block) = get_highest_block(&env, log_progress, must_be_era_end)?;
     let block_info = BlockInfo::new(network_name, block_hash, highest_block);
     dump_block_info(&block_info, out_writer)?;
 

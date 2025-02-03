@@ -252,7 +252,7 @@ fn execution_results_stats_should_succeed() {
     block_bodies.push(BlockBody::new(vec![deploy_hashes[2], deploy_hashes[3]]));
     block_body_deploy_map.push(vec![2, 3]);
 
-    let deploy_metadatas = vec![
+    let deploy_metadatas = [
         test_utils::mock_deploy_metadata(slice::from_ref(&block_headers[0].0)),
         test_utils::mock_deploy_metadata(&[block_headers[0].0, block_headers[1].0]),
         test_utils::mock_deploy_metadata(&[block_headers[1].0, block_headers[2].0]),
